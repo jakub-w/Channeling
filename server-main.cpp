@@ -3,11 +3,13 @@
 
 #include <zmq.hpp>
 
-#include "Handshaker.h"
+// #include "Handshaker.h"
+#include "PakeHandshaker.h"
 #include "Server.h"
 
 zmq::context_t ctx;
-auto handshaker = std::make_shared<StupidHandshaker>(ctx, "password");
+// auto handshaker = std::make_shared<StupidHandshaker>(ctx, "password");
+auto handshaker = std::make_shared<PakeHandshaker>(ctx, "password");
 Server server(ctx, handshaker);
 
 void close_server(int signum) {

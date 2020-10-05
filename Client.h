@@ -3,11 +3,13 @@
 
 #include <iostream>
 
+#include <zmq.h>
 #include <zmq.hpp>
 #include <zmq_addon.hpp>
 
 #include "ProtocolCommon.h"
 #include "Util.h"
+#include "msgpack/v3/unpack_decl.hpp"
 
 // TODO: Implement real client
 
@@ -27,14 +29,39 @@ class Client {
     handshaker_socket_.connect(handshaker_->GetAddress());
     crypto_handshaker_socket_.connect(handshaker_->GetCryptoAddress());
 
-    std::string id(255, ' ');
-    size_t id_len = 0;
-    socket_.getsockopt(ZMQ_ROUTING_ID, id.data(), &id_len);
-    id.resize(id_len);
+    {
+      std::stringstream buffer;
+      msgpack::pack(buffer, MessageType::ID);
+      const auto buffer_str = buffer.str();
+      socket_.send(zmq::message_t(buffer_str.data(), buffer_str.size()),
+                   zmq::send_flags::none);
+    }
+
+    zmq::message_t id_response;
+    while (not socket_.recv(id_response).has_value());
+
+    std::size_t offset = 0;
+    const std::string id = Unpack<std::string>(id_response.data<char>(),
+                                               id_response.size(),
+                                               offset)
+                           .value_or("");
+
+    if (id.empty()) {
+      std::cerr << "Id received from the server was either blank or bunk\n";
+      return false;
+    }
 
     socket_.send(handshaker_->GetAuthRequest(id), zmq::send_flags::dontwait);
 
+    std::array<zmq::pollitem_t, 2> handshaker_poll_items = {{
+              {static_cast<void*>(handshaker_socket_),
+               0, ZMQ_POLLIN, 0},
+              {static_cast<void*>(crypto_handshaker_socket_),
+               0, ZMQ_POLLIN, 0}
+            }};
+
     for(;;) {
+      // FIXME: ZMQ_REQ
       zmq::message_t message;
       // NOTE: If it doesn't have a value, it means the error EAGAIN was
       //       received.
@@ -55,10 +82,43 @@ class Client {
                     << "Data: " << to_hex(message.data<char>() + offset,
                                           message.size() - offset) << '\n';
           return false;
-        case MessageType::AUTH:
-          handshaker_socket_.send(message, zmq::send_flags::none);
+        case MessageType::AUTH: {
+          zmq::multipart_t msg;
+          msg.addstr(id);
+          msg.addstr("");
+          msg.add(std::move(message));
+          msg.send(handshaker_socket_);
           std::cout << "Forwarded to the handshaker\n\n";
+
+          zmq::poll(handshaker_poll_items.data(),
+                    handshaker_poll_items.size());
+
+          // handshaker socket
+          if (handshaker_poll_items[0].revents & ZMQ_POLLIN) {
+            // TODO: Check if the message from the handshaker is DENY or
+            //       BAD_MESSAGE and drop teh connection if so.
+            msg.recv(handshaker_socket_);
+            socket_.send(msg[2], zmq::send_flags::none);
+          }
+
+          // crypto handshaker socket
+          if (handshaker_poll_items[1].revents & ZMQ_POLLIN)  {
+            std::cout << "Crypto keys are here!\n";
+
+            msg.recv(crypto_handshaker_socket_);
+
+            auto keypair =
+                Unpack<EncKeys>(msg[2].data<char>(), msg[2].size())
+                .value();
+
+            encryption_key = std::move(keypair.get<0>());
+            decryption_key = std::move(keypair.get<1>());
+
+            return true;
+          }
+
           break;
+        }
         default:
           std::cerr << "Unhandled message type: "
                     << MessageTypeName(type) << "\n\n";
@@ -76,6 +136,9 @@ class Client {
   zmq::socket_t crypto_handshaker_socket_;
 
   std::shared_ptr<Handshaker> handshaker_;
+
+  CryptoKey encryption_key;
+  CryptoKey decryption_key;
 };
 
 #endif /* CLIENT_H */

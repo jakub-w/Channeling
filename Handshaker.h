@@ -25,8 +25,8 @@ template <typename T>
 class Handshaker {
  public:
   constexpr Handshaker()
-      : address_{address_base_ + std::to_string(socknum_++)},
-        crypto_address_{address_base_ + std::to_string(socknum_++)} {}
+      : address_{address_base() + std::to_string(socknum_++)},
+        crypto_address_{address_base() + std::to_string(socknum_++)} {}
 
   ~Handshaker() {
     Stop();
@@ -42,7 +42,7 @@ class Handshaker {
     if (thread_.joinable()) thread_.join();
   }
 
-  zmq::message_t GetAuthRequest(const std::string& id) const {
+  inline zmq::message_t GetAuthRequest(const std::string& id) const {
     return static_cast<const T*>(this)->GetAuthRequest(id);
   }
 
@@ -65,19 +65,20 @@ class Handshaker {
   std::atomic_bool listening = false;
 
  private:
+  static const std::string& address_base() {
+    static const std::string addr =
+        std::string("inproc://handshaker-") + typeid(T).name() + '-';
+    return addr;
+  }
+
   std::thread thread_;
 
-  static const std::string address_base_;
   static size_t socknum_;
 
   friend class Channel<T>;
 };
 template <typename T>
 size_t Handshaker<T>::socknum_ = 0;
-
-template <typename T>
-const std::string Handshaker<T>::address_base_ =
-    std::string("inproc://handshaker-") + typeid(T).name() + '-';
 
 class StupidHandshaker : public Handshaker<StupidHandshaker> {
  public:
@@ -115,8 +116,13 @@ class StupidHandshaker : public Handshaker<StupidHandshaker> {
 
  private:
   void worker() {
-    socket_.bind(address_);
-    crypto_socket_.bind(crypto_address_);
+    try {
+      socket_.bind(address_);
+      crypto_socket_.bind(crypto_address_);
+    } catch (const zmq::error_t& e) {
+      std::cerr << "Zmq exception thrown on bind(): " << e.what() << '\n';
+      return;
+    }
 
     std::array<zmq::pollitem_t, 1> items = {{
         {static_cast<void*>(socket_), 0, ZMQ_POLLIN, 0},

@@ -7,6 +7,7 @@
 #include "tl/expected.hpp"
 
 using CryptoKey = std::array<unsigned char, 32>;
+using EncKeys = msgpack::type::tuple<CryptoKey, CryptoKey>;
 
 enum class MessageType : int {
   BAD_MESSAGE = -2,
@@ -14,6 +15,7 @@ enum class MessageType : int {
   AUTH,
   DENY,
   AUTH_CONFIRM,
+  ID
 };
 MSGPACK_ADD_ENUM(MessageType);
 
@@ -21,20 +23,18 @@ constexpr auto MessageTypeName(MessageType type) {
   switch (type) {
     case MessageType::BAD_MESSAGE:
       return "BAD_MESSAGE";
-      break;
     case MessageType::UNKNOWN:
       return "UNKNOWN";
-      break;
     case MessageType::AUTH:
       return "AUTH";
-      break;
     case MessageType::DENY:
       return "DENY";
-      break;
     case MessageType::AUTH_CONFIRM:
       return "AUTH_CONFIRM";
-      break;
+    case MessageType::ID:
+      return "ID";
   }
+  return "Unknown type";
 }
 
 template <typename T>
@@ -44,7 +44,8 @@ Unpack(const char* data, std::size_t size, std::size_t& offset) {
     const auto handle = msgpack::unpack(data, size, offset);
     const auto object = handle.get();
     return object.as<T>();
-  } catch (const msgpack::unpack_error& e) {
+  // } catch (const msgpack::unpack_error& e) {
+  } catch (const std::exception& e) {
     return tl::unexpected{std::make_error_code(
         std::errc::no_message_available)};
   }
@@ -57,7 +58,8 @@ Unpack(const char* data, std::size_t size) {
     const auto handle = msgpack::unpack(data, size);
     const auto object = handle.get();
     return object.as<T>();
-  } catch (const msgpack::unpack_error& e) {
+  // } catch (const msgpack::unpack_error& e) {
+  } catch (const std::exception& e) {
     return tl::unexpected{std::make_error_code(
         std::errc::no_message_available)};
   }

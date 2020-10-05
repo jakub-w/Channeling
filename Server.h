@@ -1,11 +1,13 @@
 #ifndef SERVER_H
 #define SERVER_H
 
+#include <algorithm>
 #include <iostream>
 #include <memory>
 #include <string_view>
 #include <unordered_map>
 
+#include <zmq.h>
 #include <zmq.hpp>
 #include <zmq_addon.hpp>
 
@@ -105,6 +107,25 @@ class Server {
                       .value_or(MessageType::BAD_MESSAGE);
     std::cout << "Message type: " << MessageTypeName(type) << '\n';
 
+    switch (type) {
+      case MessageType::BAD_MESSAGE:
+        std::cerr << "Protocol error?\n";
+        return;
+      case MessageType::DENY:
+        std::cerr << "Client denied the connection\n";
+        return;
+      case MessageType::ID: {
+        std::stringstream buffer;
+        msgpack::pack(buffer, client_id);
+        const auto buffer_str = buffer.str();
+        message[2].rebuild(buffer_str.data(), buffer_str.size());
+        message.send(socket_);
+        return;
+      }
+      default:
+        break;
+    }
+
     if (not clients[client_id].authenticated
         and MessageType::AUTH != type) {
       std::stringstream response_ss;
@@ -170,8 +191,8 @@ class Server {
 
       client_info& ci = clients[client_id];
       ci.authenticated = true;
-      ci.encryption_key = keypair.get<0>();
-      ci.decryption_key = keypair.get<1>();
+      ci.encryption_key = std::move(keypair.get<0>());
+      ci.decryption_key = std::move(keypair.get<1>());
     }
 
     // Don't reuse the message to be sure no sensitive data leaks on the

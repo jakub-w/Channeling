@@ -3,20 +3,22 @@
 
 #include "Handshaker.h"
 
-#include "EncryptionCommon.h"
-#include "ProtocolCommon.h"
+#include <algorithm>
 #include <variant>
 #include <zmq.hpp>
+
+#include "EncryptionCommon.h"
+#include "ProtocolCommon.h"
+#include "Util.h"
+
+template<class... Ts> struct overload : Ts... { using Ts::operator()...; };
+template<class... Ts> overload(Ts...) -> overload<Ts...>;
 
 // Uses J-PAKE algorithm
 class PakeHandshaker : public Handshaker<PakeHandshaker> {
   // FIXME: Use a class based on std::array, but that zeroes its memory on
   //        move.
   using EncryptionKey = std::array<byte, NA_SS_KEYBYTES>;
-  using EncKeys = msgpack::type::tuple<CryptoKey, CryptoKey>;
-
-  template<class... Ts> struct overload : Ts... { using Ts::operator()...; };
-  template<class... Ts> overload(Ts...) -> overload<Ts...>;
 
   class Requester {
     struct loc_keys_generated {};
@@ -28,24 +30,28 @@ class PakeHandshaker : public Handshaker<PakeHandshaker> {
     };
     struct finished {};
 
-    std::variant<loc_keys_generated, all_received, finished> state_ =
-        loc_keys_generated{};
+    using State = std::variant<loc_keys_generated,
+                               all_received,
+                               finished>;
+    State state_ = loc_keys_generated{};
 
    public:
     // id is the external socket id
     Requester(const std::string& id, const EcScalar& secret,
-              EcScalar&& privkey1, EcScalar&& privkey2,
+              // EcScalar&& privkey1, EcScalar&& privkey2,
+              EcScalar&& privkey2,
               EcPoint&& pubkey1, EcPoint&& pubkey2)
         : id_{id},
           secret_{secret},
-          privkey1_{privkey1}, privkey2_{privkey2},
+          // privkey1_{privkey1}, privkey2_{privkey2},
+          privkey2_{privkey2},
           pubkey1_{pubkey1}, pubkey2_{pubkey2} {}
 
     std::variant<zmq::message_t, EncKeys>
     Next(const char* data, std::size_t size) {
       return std::visit(
           overload{
-            [&, size](loc_keys_generated&) ->
+            [&, data, size](loc_keys_generated&) ->
             std::variant<zmq::message_t, EncKeys> {
               auto new_state = all_received{};
               std::size_t offset = 0;
@@ -162,7 +168,7 @@ class PakeHandshaker : public Handshaker<PakeHandshaker> {
 
               return zmq::message_t{buffer_str.data(), buffer_str.size()};
             },
-            [&, size](all_received& context) ->
+            [&, data, size](all_received& context) ->
             std::variant<zmq::message_t, EncKeys> {
               // TODO: Receive key confirmation data from peer.
               std::size_t offset = 0;
@@ -199,7 +205,8 @@ class PakeHandshaker : public Handshaker<PakeHandshaker> {
     const std::string id_;
     const EcScalar& secret_;
 
-    EcScalar privkey1_, privkey2_;
+    EcScalar privkey2_;
+    // EcScalar privkey1_, privkey2_;
     EcPoint pubkey1_, pubkey2_;
   };
 
@@ -211,23 +218,22 @@ class PakeHandshaker : public Handshaker<PakeHandshaker> {
     };
     struct finished {};
 
-    std::variant<start, first_keys_received, crypto_keys_generated, finished>
-    state_ = start{};
+    using State = std::variant<start,
+                               first_keys_received,
+                               crypto_keys_generated,
+                               finished>;
+    State state_ = start{};
 
    public:
-    Responder(const std::string& id, const EcScalar& secret,
-              EcScalar&& privkey1, EcScalar&& privkey2,
-              EcPoint&& pubkey1, EcPoint&& pubkey2)
+    Responder(const std::string& id, const EcScalar& secret)
         : id_{id},
-          secret_{secret},
-          privkey1_{privkey1}, privkey2_{privkey2},
-          pubkey1_{pubkey1}, pubkey2_{pubkey2} {}
+          secret_{secret} {}
 
     std::variant<zmq::message_t, EncKeys>
     Next(const char* data, std::size_t size) {
       return std::visit(
           overload{
-            [&, size](start&) ->
+            [&, data, size](start&) ->
             std::variant<zmq::message_t, EncKeys> {
               // id_ = server_id_;
 
@@ -308,7 +314,7 @@ class PakeHandshaker : public Handshaker<PakeHandshaker> {
 
               return zmq::message_t{buffer_str.data(), buffer_str.size()};
             },
-            [&, size](first_keys_received&) ->
+            [&, data, size](first_keys_received&) ->
             std::variant<zmq::message_t, EncKeys> {
               std::size_t offset = 0;
 
@@ -420,11 +426,6 @@ class PakeHandshaker : public Handshaker<PakeHandshaker> {
     std::string peer_id_;
   };
 
-  template<typename Context>
-  inline auto Next(Context& ctx, const char* data, std::size_t size) {
-    return ctx.Next(data, size);
-  }
-
  public:
   enum class Step {
     UNKNOWN = -1,
@@ -454,32 +455,40 @@ class PakeHandshaker : public Handshaker<PakeHandshaker> {
 
   // id is the external socket id
   zmq::message_t GetAuthRequest(const std::string& id) {
-    auth_context& context = contexts[id];
-    context.id = id;
-    context.step = Step::PKZKP_2;
-
-    auto [privkey1, pubkey1, zkp1] = generate_keypair(context.id);
-    auto [privkey2, pubkey2, zkp2] = generate_keypair(context.id);
-    context.privkey1 = std::move(privkey1);
-    context.pubkey1 = std::move(pubkey1);
-    context.privkey2 = std::move(privkey2);
-    context.pubkey2 = std::move(pubkey2);
+    auto [privkey1, pubkey1, zkp1] = generate_keypair(id);
+    auto [privkey2, pubkey2, zkp2] = generate_keypair(id);
 
     std::stringstream buffer;
-    msgpack::pack(buffer, Step::PKZKP_2);
-    msgpack::pack(buffer, context.pubkey1);
-    msgpack::pack(buffer, context.pubkey2);
+    msgpack::pack(buffer, MessageType::AUTH);
+    msgpack::pack(buffer, pubkey1);
+    msgpack::pack(buffer, pubkey2);
     msgpack::pack(buffer, zkp1);
     msgpack::pack(buffer, zkp2);
+
     std::string buffer_str = buffer.str();
+
+    auto context = contexts.find(id);
+    if (contexts.end() == context) {
+      context = contexts.emplace(id, Requester(id, secret_,
+                                                   // std::move(privkey1),
+                                                   std::move(privkey2),
+                                                   std::move(pubkey1),
+                                                   std::move(pubkey2)))
+                .first;
+    }
 
     return zmq::message_t{buffer_str.data(), buffer_str.size()};
   }
 
  private:
   void worker() {
-    socket_.bind(address_);
-    crypto_socket_.bind(crypto_address_);
+    try {
+      socket_.bind(address_);
+      crypto_socket_.bind(crypto_address_);
+    } catch (const zmq::error_t& e) {
+      std::cerr << "Zmq exception thrown on bind(): " << e.what() << '\n';
+      return;
+    }
 
     std::array<zmq::pollitem_t, 1> items = {{
         {socket_, 0, ZMQ_POLLIN, 0}
@@ -494,24 +503,21 @@ class PakeHandshaker : public Handshaker<PakeHandshaker> {
 
         zmq::multipart_t message(socket_);
 
+        std::cout << "Handshaker received: " << message.str() << "\n\n";
+
         // FIXME: Check if the message has 3 frames
 
         auto client_id = std::string{message[0].data<char>(),
           message[0].size()};
-        auto& context = contexts[client_id];
 
         const char* data = message[2].data<char>();
         const size_t data_size = message[2].size();
 
-        auto type = Unpack<MessageType>(data, data_size, offset)
+        const auto type = Unpack<MessageType>(data, data_size, offset)
                     .value_or(MessageType::BAD_MESSAGE);
 
-        auto step = Unpack<Step>(data, data_size, offset)
-                    .value_or(Step::UNKNOWN);
-
         if (client_id.empty() or
-            MessageType::AUTH != type or
-            not check_step(context.step, step)) {
+            MessageType::AUTH != type) {
           msgpack::pack(buffer, type);
           auto buffer_str = buffer.str();
           message[2].rebuild(buffer_str.data(), buffer_str.size());
@@ -519,254 +525,41 @@ class PakeHandshaker : public Handshaker<PakeHandshaker> {
           continue;
         }
 
-        bool deny = false;
-        bool bad_msg = false;
-        // TODO: Parse the message proper.
-        switch (step) {
-          case Step::UNKNOWN: case Step::NONE: {
-            // This should never happen.
-            deny = true;
-            break;
-          }
-          case Step::PKZKP_2: {
-            // Server: first received message
-            context.id = server_id_;
-
-            auto peer_pubkey1 = Unpack<EcPoint>(data, data_size, offset);
-            auto peer_pubkey2 = Unpack<EcPoint>(data, data_size, offset);
-            auto peer_zkp1 = Unpack<zkp>(data, data_size, offset);
-            auto peer_zkp2 = Unpack<zkp>(data, data_size, offset);
-
-            if (not (peer_pubkey1 and peer_pubkey2 and
-                     peer_zkp1 and peer_zkp2)) {
-              bad_msg = true;
-              break;
-            }
-
-            context.peer_id = peer_zkp1.value().user_id;
-
-            // Check the received data
-            if (not (check_zkp(peer_zkp1.value(), peer_pubkey1.value(),
-                               context.peer_id, client_id) and
-                     check_zkp(peer_zkp2.value(), peer_pubkey2.value(),
-                               context.peer_id, client_id))) {
-              deny = true;
-              break;
-            }
-
-            context.peer_pubkey1 = std::move(peer_pubkey1.value());
-            context.peer_pubkey2 = std::move(peer_pubkey2.value());
-
-            // TODO: Generate and save all 3 keypairs and zkp's. Send pubkeys
-            //       and zkp's.
-            // This is tricky. Server should use its id and the client the id
-            // provided by the socket. How to distinguish the use-cases?
-            // When GetAuthRequest() is called, we know we're the client, so
-            // the context should store a socket id on the call.
-            // When the server gets its first message, it knows that it's the
-            // server, so we should take an id passed in the constructor.
-            // Maybe we should generate an id?
-
-            // Generate new key-pairs and zkp's for them
-            auto [privkey1, pubkey1, zkp1] = generate_keypair(context.id);
-            auto [privkey2, pubkey2, zkp2] = generate_keypair(context.id);
-
-            // Generate the last key-pair. This one is special:
-            // G1 = peer_pubkey1 + peer_pubkey2 + pubkey1
-            EcPoint zkp_gen;
-            crypto_core_ristretto255_add(
-                zkp_gen.data(), peer_pubkey1.data(), peer_pubkey2.data());
-            crypto_core_ristretto255_add(
-                zkp_gen.data(), zkp_gen.data(), pubkey1.data());
-            // privkey3 = privkey2 * secret_
-            EcScalar privkey3;
-            crypto_core_ristretto255_scalar_mul(
-                privkey3.data(), privkey2.data(), secret_.data());
-            // pubkey3 = G1 * privkey3
-            EcPoint pubkey3;
-            if (crypto_scalarmult_ristretto255(
-                    pubkey3.data(), privkey3.data(), zkp_gen.data())
-                != 0) {
-              deny = true;
-              break;
-            }
-
-            const auto zkp3 =
-                make_zkp(context.id, privkey3, pubkey3, zkp_gen);
-
-            context.privkey1 = std::move(privkey1);
-            context.pubkey1 = std::move(pubkey1);
-            context.privkey2 = std::move(privkey2);
-            context.pubkey2 = std::move(pubkey2);
-            context.privkey3 = std::move(privkey3);
-            context.pubkey3 = std::move(pubkey3);
-
-            // Build the message and send
-            msgpack::pack(buffer, MessageType::AUTH);
-            msgpack::pack(buffer, context.pubkey1);
-            msgpack::pack(buffer, context.pubkey2);
-            msgpack::pack(buffer, context.pubkey3);
-            msgpack::pack(buffer, zkp1);
-            msgpack::pack(buffer, zkp2);
-            msgpack::pack(buffer, zkp3);
-
-            auto buffer_str = buffer.str();
-            message[2].rebuild(buffer_str.data(), buffer_str.size());
-            message.send(socket_);
-
-            // TODO: change the state
-            continue;
-
-            break;
-          }
-          case Step::PKZKP_3: {
-            // Client: First response from the server
-
-            // context.peer_id = peer_zkp1.value().user_id;
-
-            // TODO: change the state
-            break;
-          }
-          case Step::PKZKP_KC: {
-            // Server: Second message from the client. Contains the third
-            // pubkey and zkp for it, as well as key confirmation.
-
-            auto peer_pubkey3 = Unpack<EcPoint>(data, data_size, offset);
-            auto peer_zkp3 = Unpack<zkp>(data, data_size, offset);
-            auto peer_kc = Unpack<HmacHash>(data, data_size, offset);
-
-            if (not (peer_pubkey3 and peer_zkp3 and peer_kc)) {
-              bad_msg = true;
-              break;
-            }
-
-            context.peer_pubkey3 = std::move(peer_pubkey3.value());
-
-            // Verify
-            // G2 = peer_pubkey1 + pubkey1 + pubkey2
-            EcPoint peer_zkp_gen;
-            crypto_core_ristretto255_add(peer_zkp_gen.data(),
-                                         context.peer_pubkey1.data(),
-                                         context.pubkey1.data());
-            crypto_core_ristretto255_add(peer_zkp_gen.data(),
-                                         peer_zkp_gen.data(),
-                                         context.pubkey2.data());
-            if (not
-                (crypto_core_ristretto255_is_valid_point(
-                    peer_zkp_gen.data()) and
-                 check_zkp(
-                     peer_zkp3.value(), context.peer_pubkey3,
-                     context.peer_id, context.id, peer_zkp_gen))) {
-              deny = true;
-              break;
-            }
-
-            // Compute the session key material
-            // K = (peer_pubkey3 - (peer_pubkey2 x [privkey2 * secret_]))
-            //         x [privkey2]
-            EcPoint key_material = make_key_material(
-                context.peer_pubkey3, context.peer_pubkey2,
-                context.privkey2, secret_);
-
-            // Key confirmation
-            // Generate a signing key: k' = KDF(K || 1 || "JW_KGEN")
-            HmacKey kc_key;
-            // Generate an encryption keys: EK = KDF(K || 3 || "JW_KGEN")
-            //                              DK = KDF(K || 2 || "JW_KGEN")
-            EncryptionKey enc_key, dec_key;
-
-            // The order of args is important! Note that dec_key and enc_key
-            // are in inverted order to the one in connect().
-            derive_keys(key_material, kc_key, dec_key, enc_key);
-
-            // Verify the received key confirmation data.
-            const auto expected_peer_kc =
-                make_key_confirmation(
-                    kc_key,
-                    context.peer_id, context.peer_pubkey1, context.peer_pubkey2,
-                    context.id, context.pubkey1, context.pubkey2);
-            if (peer_kc != expected_peer_kc) {
-              deny = true;
-              break;
-            }
-
-            // Generate the key confirmation data
-            const auto kc =
-                make_key_confirmation(
-                    kc_key,
-                    context.id, context.pubkey1, context.pubkey2,
-                    context.peer_id, context.peer_pubkey1, context.peer_pubkey2);
-
-            // Build the message and send
-            msgpack::pack(buffer, MessageType::AUTH);
-            msgpack::pack(buffer, kc);
-
-            const auto buffer_str = buffer.str();
-            message[2].rebuild(buffer_str.data(), buffer_str.size());
-            message.send(socket_);
-
-            // TODO: Send the encryption keys on crypto_socket_.
-            // But the response was already sent. If we send crypto stuff to
-            // the server, it will write another response to the client.
-            // Therefore we should wait for another request, for now saving
-            // the keys in the context, I guess?
-
-            // TODO: change the state
-            break;
-          }
-          case Step::KC: {
-            // Client: Second response from the server. Contains only the key
-            // confirmation.
-
-            // TODO: change the state
-            break;
-          }
+        auto it = contexts.find(client_id);
+        if (contexts.end() == it) {
+          it = contexts.emplace(client_id, Responder(server_id_, secret_))
+               .first;
         }
+        AuthContext& context = it->second;
 
-        if (deny) {
-          msgpack::pack(buffer, MessageType::DENY);
-          auto buffer_str = buffer.str();
-          message[2].rebuild(buffer_str.data(), buffer_str.size());
-          message.send(socket_);
-          continue;
-        } else if (bad_msg) {
-          msgpack::pack(buffer, MessageType::BAD_MESSAGE);
-          auto buffer_str = buffer.str();
-          message[2].rebuild(buffer_str.data(), buffer_str.size());
-          message.send(socket_);
-          continue;
-        }
+        auto result = std::visit([=](auto& ctx) {
+          return ctx.Next(data + offset, data_size - offset);
+        },
+          context);
+
+        std::visit(overload{
+            [&](zmq::message_t&) {
+              message[2].swap(std::get<zmq::message_t>(result));
+
+              std::cout << "Sending back:\n";
+              std::cout << message.str() << "\n\n";
+
+              message.send(socket_);
+            },
+            [&](EncKeys&) {
+              msgpack::pack(buffer, std::get<EncKeys>(result));
+              const auto buffer_str = buffer.str();
+              message[2].rebuild(buffer_str.data(), buffer_str.size());
+
+              std::cout << "Crypto socket:\n";
+              std::cout << message.str() << "\n\n";
+
+              message.send(crypto_socket_);
+            }},
+          result);
       }
     }
     std::cout << "Handshaker stopped\n";
-  }
-
-  constexpr bool check_step(const Step current, const Step received) {
-    switch (current) {
-      case Step::UNKNOWN:
-        return false;
-        break;
-      case Step::NONE:
-        if (Step::PKZKP_2 == received) return true;
-        return false;
-        break;
-      case Step::PKZKP_2:
-        if (Step::PKZKP_3 == received) return true;
-        return false;
-        break;
-      case Step::PKZKP_3:
-        if (Step::PKZKP_KC == received) return true;
-        return false;
-        break;
-      case Step::PKZKP_KC:
-        if (Step::KC == received) return true;
-        return false;
-        break;
-      case Step::KC:
-        // After the key confirmation there's nothing more to do.
-        return false;
-        break;
-    }
   }
 
   static zmq::message_t make_msg(MessageType type) {
@@ -806,76 +599,21 @@ class PakeHandshaker : public Handshaker<PakeHandshaker> {
   }
 
 
-
-  struct auth_context {
-    Step step = Step::UNKNOWN;
-
-    std::string id, peer_id;
-
-    EcScalar privkey1, privkey2, privkey3;
-    EcPoint pubkey1, pubkey2, pubkey3;
-
-    EcPoint peer_pubkey1, peer_pubkey2, peer_pubkey3;
-
-    // #################### MEMORY ####################
-    auth_context() = default;
-    auth_context(const auth_context&) = delete;
-    const auth_context& operator=(const auth_context&) = delete;
-    auth_context(auth_context&& other) = delete;
-    auth_context& operator=(auth_context&& other) = delete;
-
-    // auth_context(auth_context&& other)
-    //     : privkey1{std::move(other.privkey1)},
-    //       privkey2{std::move(other.privkey2)},
-    //       privkey3{std::move(other.privkey3)},
-    //       pubkey1{std::move(other.pubkey1)},
-    //       pubkey2{std::move(other.pubkey2)},
-    //       pubkey3{std::move(other.pubkey3)},
-    //       peer_pubkey1{std::move(other.peer_pubkey1)},
-    //       peer_pubkey2{std::move(other.peer_pubkey2)},
-    //       peer_pubkey3{std::move(other.peer_pubkey3)} {
-    //   sodium_memzero(other.privkey1.data(), other.privkey1.size());
-    //   sodium_memzero(other.privkey2.data(), other.privkey2.size());
-    //   sodium_memzero(other.privkey3.data(), other.privkey3.size());
-    // }
-
-    // auth_context& operator=(auth_context&& other) {
-    //   privkey1 = std::move(other.privkey1);
-    //   privkey2 = std::move(other.privkey2);
-    //   privkey3 = std::move(other.privkey3);
-    //   pubkey1 = std::move(other.pubkey1);
-    //   pubkey2 = std::move(other.pubkey2);
-    //   pubkey3 = std::move(other.pubkey3);
-    //   peer_pubkey1 = std::move(other.peer_pubkey1);
-    //   peer_pubkey2 = std::move(other.peer_pubkey2);
-    //   peer_pubkey3 = std::move(other.peer_pubkey3);
-
-    //   sodium_memzero(other.privkey1.data(), other.privkey1.size());
-    //   sodium_memzero(other.privkey2.data(), other.privkey2.size());
-    //   sodium_memzero(other.privkey3.data(), other.privkey3.size());
-
-    //   return *this;
-    // }
-
-    ~auth_context() {
-      sodium_memzero(privkey1.data(), privkey1.size());
-      sodium_memzero(privkey2.data(), privkey2.size());
-      sodium_memzero(privkey3.data(), privkey3.size());
-    }
-  };
-
   static size_t auth_number;
 
   zmq::socket_t socket_;
   zmq::socket_t crypto_socket_;
 
-  std::atomic_bool listening = false;
-  std::thread thread_;
+  // std::atomic_bool listening = false;
+  // std::thread thread_;
 
   EcScalar secret_;
   std::string server_id_;
 
-  std::unordered_map<std::string, auth_context> contexts;
+  using AuthContext = std::variant<Requester, Responder>;
+  std::unordered_map<std::string, AuthContext> contexts;
+
+  friend class Handshaker;
 };
 size_t PakeHandshaker::auth_number = 0;
 MSGPACK_ADD_ENUM(PakeHandshaker::Step);

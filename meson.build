@@ -36,12 +36,14 @@ includes = include_directories('msgpack-c/include',
 
 # Binaries
 executable('server',
-	   sources: ['server-main.cpp'],
+	   sources: ['server-main.cpp',
+		     'EncryptionCommon.cpp'],
 	   include_directories: includes,
 	   dependencies: required_deps)
 
 executable('client',
-	   sources: ['client-main.cpp'],
+	   sources: ['client-main.cpp',
+		     'EncryptionCommon.cpp'],
 	   include_directories: includes,
 	   dependencies: required_deps)
 

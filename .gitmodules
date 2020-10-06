@@ -1,3 +1,6 @@
 [submodule "expected"]
 	path = expected
 	url = https://github.com/TartanLlama/expected.git
+[submodule "SodiumCipherStream"]
+	path = SodiumCipherStream
+	url = https://github.com/jakub-w/SodiumCipherStream.git

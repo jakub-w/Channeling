@@ -34,17 +34,24 @@ required_deps = [zmq_dep, sodium_dep]
 includes = include_directories('msgpack-c/include',
 			       'expected/include')
 
+
+# Subprojects
+cipher_stream_inc = include_directories('SodiumCipherStream')
+
+
 # Binaries
 executable('server',
 	   sources: ['server-main.cpp',
-		     'EncryptionCommon.cpp'],
-	   include_directories: includes,
+		     'EncryptionCommon.cpp',
+		     'SodiumCipherStream/SodiumCipherStream.cpp'],
+	   include_directories: [includes, cipher_stream_inc],
 	   dependencies: required_deps)
 
 executable('client',
 	   sources: ['client-main.cpp',
-		     'EncryptionCommon.cpp'],
-	   include_directories: includes,
+		     'EncryptionCommon.cpp',
+		     'SodiumCipherStream/SodiumCipherStream.cpp'],
+	   include_directories: [includes, cipher_stream_inc],
 	   dependencies: required_deps)
 
 # executable('test_all',

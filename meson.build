@@ -58,8 +58,3 @@ executable('client',
 # 	   sources: ['test/main.cpp'],
 # 	   include_directories: includes,
 # 	   dependencies: zmq_dep)
-
-executable('zeromq-protocol',
-           sources: ['main.cpp'],
-	   include_directories: includes,
-           dependencies: required_deps)

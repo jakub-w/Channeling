@@ -297,11 +297,7 @@ class Client {
         return make_unexpected(std::errc::operation_not_permitted);
       }
 
-      std::stringstream buffer;
-      msgpack::pack(buffer, data);
-      const auto buffer_str = buffer.str();
-
-      zmq::message_t message{buffer_str.data(), buffer_str.size()};
+      zmq::message_t message{data.data(), data.size()};
 
       std::cout << "Request() - Passing the message\n";
       user_data_socket_req_.send(message, zmq::send_flags::none);

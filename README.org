@@ -1,0 +1,71 @@
+#+TITLE: Channeling
+
+Channeling is a library abstracting away handshaking and encryption for secure communication.
+
+Currently the only handshaking protocol implemented is one of PAKE (Password Authenticated Key Exchange) variety.
+
+The encryption is done by ~libsodium~'s implementation of ~XChaCha20-Poly1305~.
+
+* Work In Progress
+The library is considered to be in pre-alpha, unstable state. Everything may change, API included.
+
+* Current API
+** Server
+#+BEGIN_SRC cpp
+  #include "PakeHandshaker.h"
+  #include "Server.h"
+
+  int main() {
+    zmq::context_t ctx;
+    auto handshaker = std::make_shared<PakeHandshaker>(ctx, "password");
+
+    const auto message_handler = [](const Bytes& data) {
+      // Print the message, treating is as a string.
+      std::cout.write(reinterpret_cast<const char*>(data.data()),
+                      data.size()) << '\n';
+
+      // Return "response" in bytes.
+      return Bytes{'r', 'e', 's', 'p', 'o', 'n', 's', 'e'};
+    };
+
+    Server server(ctx, handshaker, message_handler);
+
+    // Bind to ZeroMQ address, could be "tcp://1.2.3.4" for network address
+    server.Bind("ipc://zeromq-server");
+    server.Run(); // never exits
+  }
+#+END_SRC
+** Client
+#+BEGIN_SRC cpp
+  #include "Client.h"
+  #include "PakeHandshaker.h"
+
+  int main() {
+    zmq::context_t ctx;
+    auto handshaker = std::make_shared<PakeHandshaker>(ctx, "password");
+    Client client{ctx, handshaker};
+
+    if (not client.Connect("ipc://zeromq-server")) {
+      std::cerr << "Connection failed\n";
+      return 1;
+    }
+
+    auto ec = client.Start(); // works asynchronously
+    if (ec) {
+      std::cerr << ec.message() << '\n';
+      return 1;
+    }
+
+    // tl::expected<Bytes, std::error_code>
+    const auto maybe_response = client.Request(data); // is thread safe
+    if (maybe_response) {
+      // Print data as a string
+      std::cout.write(reinterpret_cast<const char*>(maybe_response.value()))
+          << '\n';
+    } else {
+      std::cerr << maybe_response.error().message() << '\n';
+    }
+
+    return 0;
+  }
+#+END_SRC

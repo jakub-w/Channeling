@@ -122,10 +122,7 @@ class Server {
         and (not std::any_of(allowed_before_auth.cbegin(),
                              allowed_before_auth.cend(),
                              [=](MessageType t){ return t == type; }))) {
-      std::stringstream response_ss;
-      msgpack::pack(response_ss, MessageType::DENY);
-      std::string response = response_ss.str();
-      message[2].rebuild(response.data(), response.size());
+      message[2] = make_msg(MessageType::DENY);
 
       message.send(socket_);
       return;
@@ -217,12 +214,7 @@ class Server {
 
         std::cout << "Sending AUTH_FINISHED to client\n";
 
-        std::stringstream buffer;
-        msgpack::pack(buffer, MessageType::AUTH_FINISHED);
-        msgpack::pack(buffer, enc_header);
-        const auto buffer_str = buffer.str();
-
-        message[2].rebuild(buffer_str.data(), buffer_str.size());
+        message[2] = make_msg(MessageType::AUTH_FINISHED, enc_header);
         message.send(socket_);
         break;
       }
@@ -272,11 +264,7 @@ class Server {
 
         ci.authenticated = true;
 
-        std::stringstream buffer;
-        msgpack::pack(buffer, MessageType::ACK);
-        const auto buffer_str = buffer.str();
-
-        message[2].rebuild(buffer_str.data(), buffer_str.size());
+        message[2] = make_msg(MessageType::ACK);
         message.send(socket_);
         break;
       }

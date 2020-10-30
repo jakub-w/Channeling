@@ -49,13 +49,7 @@ class Client {
     handshaker_->Start();
     handshaker_socket_.connect(handshaker_->GetAddress());
 
-    {
-      std::stringstream buffer;
-      msgpack::pack(buffer, MessageType::ID);
-      const auto buffer_str = buffer.str();
-      socket_.send(zmq::message_t(buffer_str.data(), buffer_str.size()),
-                   zmq::send_flags::none);
-    }
+    socket_.send(make_msg(MessageType::ID), zmq::send_flags::none);
 
     zmq::message_t id_response;
     while (not socket_.recv(id_response).has_value());
@@ -133,13 +127,8 @@ class Client {
             return false;
           }
 
-          std::stringstream buffer;
-          msgpack::pack(buffer, MessageType::AUTH_FINISHED);
-          msgpack::pack(buffer, enc_header);
-          const auto buffer_str = buffer.str();
-
-          message.rebuild(buffer_str.data(), buffer_str.size());
-          socket_.send(message, zmq::send_flags::none);
+          socket_.send(make_msg(MessageType::AUTH_FINISHED,enc_header),
+                       zmq::send_flags::none);
           break;
         }
         case MessageType::AUTH_FINISHED: {

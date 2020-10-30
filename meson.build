@@ -44,13 +44,13 @@ endif
 # Dependencies
 zmq_dep = dependency('libzmq')
 sodium_dep = dependency('libsodium')
+msgpack_dep = dependency('msgpack')
 
-required_deps = [zmq_dep, sodium_dep]
+required_deps = [zmq_dep, sodium_dep, msgpack_dep]
 
 
 # Includes
-includes = include_directories('msgpack-c/include',
-			       'expected/include')
+includes = include_directories('expected/include')
 
 
 # Subprojects

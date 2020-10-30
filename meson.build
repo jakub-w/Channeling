@@ -36,8 +36,7 @@ if get_option('buildtype').startswith('debug')
     '-lubsan',
     language : 'cpp')
 elif get_option('buildtype') == 'release'
-  add_project_arguments('-DNDEBUG', '-O3', '-s',
-                        language : 'cpp')
+  add_project_arguments('-DNDEBUG', '-O2', language : 'cpp')
 endif
 
 

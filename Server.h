@@ -34,8 +34,6 @@ class Server {
   };
 
  public:
-  using Bytes = std::vector<unsigned char>;
-
   Server(zmq::context_t& context,
          std::shared_ptr<Handshaker> handshaker,
          std::function<Bytes(const Bytes&)>&& message_handler)
@@ -88,8 +86,7 @@ class Server {
     socket.send(make_msg(type), zmq::send_flags::dontwait);
   }
 
-  inline std::vector<unsigned char> handle_user_data(
-      const std::vector<unsigned char>& data) {
+  inline Bytes handle_user_data(const Bytes& data) {
     return user_data_handler_(data);
   }
 

@@ -12,6 +12,7 @@ using CryptoKey = std::array<unsigned char, 32>;
 using EncKeys = msgpack::type::tuple<CryptoKey, CryptoKey>;
 // using EncKeys = std::tuple<CryptoKey, CryptoKey>;
 using PartialMessage = std::string;
+using Bytes = std::vector<unsigned char>;
 
 enum class MessageType : int {
   PROTOCOL_ERROR = -3,

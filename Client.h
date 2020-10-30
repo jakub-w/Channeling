@@ -1,11 +1,16 @@
 #ifndef CLIENT_H
 #define CLIENT_H
 
+#include <chrono>
 #include <iostream>
+#include <optional>
+#include <variant>
 
 #include <zmq.h>
 #include <zmq.hpp>
 #include <zmq_addon.hpp>
+
+#include "SodiumCipherStream.h"
 
 #include "ProtocolCommon.h"
 #include "Util.h"
@@ -15,19 +20,22 @@
 
 template <typename Handshaker>
 class Client {
+  using HandshakerMessageType = typename Handshaker::HandshakerMessageType;
+
  public:
   Client(zmq::context_t& context, std::shared_ptr<Handshaker> handshaker)
       : socket_{context, ZMQ_REQ},
         handshaker_socket_{context, ZMQ_PAIR},
-        crypto_handshaker_socket_{context, ZMQ_PAIR},
-        handshaker_{std::move(handshaker)} {}
+        handshaker_{std::move(handshaker)},
+        user_data_socket_resp_{context, ZMQ_PAIR},
+        user_data_socket_req_{context, ZMQ_PAIR}
+  {}
 
   [[nodiscard]]
   bool Connect(std::string_view address) {
     socket_.connect(address.data());
     handshaker_->Start();
     handshaker_socket_.connect(handshaker_->GetAddress());
-    crypto_handshaker_socket_.connect(handshaker_->GetCryptoAddress());
 
     {
       std::stringstream buffer;
@@ -51,14 +59,7 @@ class Client {
       return false;
     }
 
-    socket_.send(handshaker_->GetAuthRequest(id), zmq::send_flags::dontwait);
-
-    std::array<zmq::pollitem_t, 2> handshaker_poll_items = {{
-              {static_cast<void*>(handshaker_socket_),
-               0, ZMQ_POLLIN, 0},
-              {static_cast<void*>(crypto_handshaker_socket_),
-               0, ZMQ_POLLIN, 0}
-            }};
+    socket_.send(handshaker_->GetAuthRequest(id), zmq::send_flags::none);
 
     for(;;) {
       // FIXME: ZMQ_REQ
@@ -74,9 +75,120 @@ class Client {
                         .value_or(MessageType::UNKNOWN);
 
       switch (type) {
-        case MessageType::AUTH_CONFIRM:
+        case MessageType::AUTH_CONFIRM: {
+          std::cout << "AUTH_FINISHED received\n";
+
+          auto dec_header = Unpack<crypto::CryptoHeader>(
+              message.data<char>(), message.size(), offset);
+
+          if (not (std::holds_alternative<CryptoKey>(decryption_ctx) and
+                   std::holds_alternative<CryptoKey>(encryption_ctx))) {
+            std::cerr << "Client state inconsistent. Can't proceed with "
+                "encryption setup\n";
+            return false;
+          }
+          if (not dec_header.has_value()) {
+            std::cerr << "Decryption header was malformed\n";
+            return false;
+          }
+
+          auto dec_key = std::get<CryptoKey>(decryption_ctx);
+
+          decryption_ctx = crypto::SodiumDecryptionContext{};
+          auto& dec_ctx =
+              std::get<crypto::SodiumDecryptionContext>(decryption_ctx);
+
+          auto ec = dec_ctx.Initialize(
+              dec_key.data(), dec_key.size(),
+              dec_header.value().data(), dec_header.value().size());
+          if (ec) {
+            std::cerr << "Protocol error while initializing decryption "
+                "context\n";
+            return false;
+          }
+
+          auto enc_key = std::get<CryptoKey>(encryption_ctx);
+          encryption_ctx = crypto::SodiumEncryptionContext{};
+          auto& enc_ctx =
+              std::get<crypto::SodiumEncryptionContext>(encryption_ctx);
+
+          crypto::CryptoHeader enc_header;
+          ec = enc_ctx.Initialize(enc_key.data(), enc_key.size(),
+                                  enc_header.data(), enc_header.size());
+          if (ec) {
+            std::cerr << "Protocol error while initializing encryption "
+                "context\n";
+            return false;
+          }
+
+          std::stringstream buffer;
+          msgpack::pack(buffer, MessageType::AUTH_FINISHED);
+          msgpack::pack(buffer, enc_header);
+          const auto buffer_str = buffer.str();
+
+          message.rebuild(buffer_str.data(), buffer_str.size());
+          socket_.send(message, zmq::send_flags::none);
+          break;
+        }
+        case MessageType::AUTH_FINISHED: {
+          std::cout << "AUTH_FINISHED received\n";
+
+          auto dec_header = Unpack<crypto::CryptoHeader>(
+              message.data<char>(), message.size(), offset);
+
+          if (not (std::holds_alternative<CryptoKey>(decryption_ctx) and
+                   std::holds_alternative<crypto::SodiumEncryptionContext>(
+                       encryption_ctx))) {
+            std::cerr << "Client state inconsistent. Can't proceed with "
+                "encryption setup\n";
+            return false;
+          }
+          if (not dec_header.has_value()) {
+            std::cerr << "Decryption header was malformed\n";
+            return false;
+          }
+
+          auto dec_key = std::get<CryptoKey>(decryption_ctx);
+
+          decryption_ctx = crypto::SodiumDecryptionContext{};
+          auto& dec_ctx =
+              std::get<crypto::SodiumDecryptionContext>(decryption_ctx);
+
+          auto ec = dec_ctx.Initialize(
+              dec_key.data(), dec_key.size(),
+              dec_header.value().data(), dec_header.value().size());
+          if (ec) {
+            std::cerr << "Protocol error while initializing decryption "
+                "context\n";
+            return false;
+          }
+
           return true;
-        case MessageType::DENY: case MessageType::BAD_MESSAGE:
+        }
+        case MessageType::ACK: {
+          if (not (std::holds_alternative<crypto::SodiumDecryptionContext>(
+                       decryption_ctx) and
+                   std::holds_alternative<crypto::SodiumEncryptionContext>(
+                       encryption_ctx))) {
+            std::cerr << "State inconsistent\n";
+            return false;
+          }
+
+          const auto& enc_ctx =
+              std::get<crypto::SodiumEncryptionContext>(encryption_ctx);
+          const auto& dec_ctx =
+              std::get<crypto::SodiumDecryptionContext>(decryption_ctx);
+
+          if (not (enc_ctx.Initialized() and dec_ctx.Initialized())) {
+            std::cerr << "State inconsistent\n";
+            return false;
+          }
+
+          return true;
+        }
+        case MessageType::DENY:
+        case MessageType::BAD_MESSAGE:
+        case MessageType::PROTOCOL_ERROR:
           std::cerr << "Not authenticated. Message received:\n"
                     << "Type: " << MessageTypeName(type) << '\n'
                     << "Data: " << to_hex(message.data<char>() + offset,
@@ -90,33 +202,16 @@ class Client {
           msg.send(handshaker_socket_);
           std::cout << "Forwarded to the handshaker\n\n";
 
-          zmq::poll(handshaker_poll_items.data(),
-                    handshaker_poll_items.size());
+          msg.recv(handshaker_socket_);
 
-          // handshaker socket
-          if (handshaker_poll_items[0].revents & ZMQ_POLLIN) {
-            // TODO: Check if the message from the handshaker is DENY or
-            //       BAD_MESSAGE and drop teh connection if so.
-            msg.recv(handshaker_socket_);
-            socket_.send(msg[2], zmq::send_flags::none);
+          auto maybe_message = handle_handshaker_message(msg[2]);
+
+          if (not maybe_message) {
+            std::cerr << "Error while processing a handshaker message\n";
+            return false;
           }
 
-          // crypto handshaker socket
-          if (handshaker_poll_items[1].revents & ZMQ_POLLIN)  {
-            std::cout << "Crypto keys are here!\n";
-
-            msg.recv(crypto_handshaker_socket_);
-
-            auto keypair =
-                Unpack<EncKeys>(msg[2].data<char>(), msg[2].size())
-                .value();
-
-            encryption_key = std::move(keypair.get<0>());
-            decryption_key = std::move(keypair.get<1>());
-
-            return true;
-          }
-
+          socket_.send(maybe_message.value(), zmq::send_flags::none);
           break;
         }
         default:
@@ -124,82 +219,242 @@ class Client {
                     << MessageTypeName(type) << "\n\n";
           const auto bad_msg = MessageType::BAD_MESSAGE;
           message.rebuild(&bad_msg, sizeof(bad_msg));
-          socket_.send(message, zmq::send_flags::dontwait);
+          socket_.send(message, zmq::send_flags::none);
           return false;
       }
     }
   }
 
+  void Run() {
+    if (not (
+            std::holds_alternative<crypto::SodiumEncryptionContext>(
+                encryption_ctx) and
+            std::holds_alternative<crypto::SodiumDecryptionContext>(
+                decryption_ctx) and
+            socket_.connected())) {
+      std::cerr << "Wrong state to call Run(). "
+          "The client isn't properly connected to the server.\n";
+      return;
+    }
+
+    user_data_socket_resp_.bind(user_data_socket_address);
+    running_ = true;
+    zmq::message_t message;
+
+    std::array<zmq::pollitem_t, 1> items = {{
+        zmq::pollitem_t{user_data_socket_resp_, 0, ZMQ_POLLIN, 0}
+      }};
+
+    while (running_) {
+      zmq::poll(items.data(), items.size(), std::chrono::milliseconds(500));
+
+      if (items[0].revents & ZMQ_POLLIN) {
+        if (not user_data_socket_resp_.recv(message)) continue;
+        std::cout << "Run() - message received: " << message << '\n';;
+
+        auto& enc_ctx =
+            std::get<crypto::SodiumEncryptionContext>(encryption_ctx);
+        crypto::Bytes ciphertext(message.size() + crypto::NA_SS_ABYTES);
+        auto ec = enc_ctx.Encrypt(message.data<unsigned char>(),
+                                  message.size(),
+                                  ciphertext.data(),
+                                  ciphertext.size());
+
+        if (ec) {
+          // TODO: Handle ec
+          std::cerr << "Error while encrypting data\n";
+          user_data_socket_resp_.send(zmq::message_t(),
+                                      zmq::send_flags::none);
+          continue;
+        }
+
+        std::cout << "Sending to server...\n";
+        socket_.send(make_msg(MessageType::ENCRYPTED_DATA, ciphertext),
+                     zmq::send_flags::none);
+        while (not socket_.recv(message));
+
+        std::size_t offset = 0;
+        auto type = Unpack<MessageType>(message.data<char>(),
+                                        message.size(), offset)
+                    .value_or(MessageType::UNKNOWN);
+
+        if (MessageType::ENCRYPTED_DATA != type) {
+          // TODO: Handle more types
+          std::cerr << "Wrong message received - type: "
+                    << MessageTypeName(type) << '\n';
+          user_data_socket_resp_.send(zmq::message_t(),
+                                      zmq::send_flags::none);
+          continue;
+        }
+
+        Unpack<std::vector<unsigned char>>(
+            message.data<char>(), message.size(), offset)
+            .map([this, &message](crypto::Bytes&& ciphertext){
+              auto& dec_ctx =
+                  std::get<crypto::SodiumDecryptionContext>(decryption_ctx);
+              auto maybe_cleartext = dec_ctx.Decrypt(ciphertext);
+
+              if (std::holds_alternative<std::error_code>(maybe_cleartext)) {
+                std::cerr << "Error decrypting message\n";
+                message.rebuild("", 0);
+                return;
+              }
+
+              const auto& cleartext =
+                  std::get<crypto::Bytes>(maybe_cleartext);
+              message.rebuild(cleartext.data(), cleartext.size());
+            })
+            .or_else([this, &message](std::error_code&& /*ec*/){
+              std::cerr << "Error unpacking message\n";
+              message.rebuild("", 0);
+            });
+
+        user_data_socket_resp_.send(message, zmq::send_flags::none);
+      }
+      if (items[0].revents & ZMQ_POLLERR) {
+        std::cout << "Err\n";
+        return;
+      }
+    }
+  }
+
+  void Stop() {
+    std::cout << "Stopping the client...\n";
+    running_ = false;
+  }
+
+  std::vector<unsigned char> Request(const std::vector<unsigned char>& data) {
+    // if (not user_data_socket_req_.connected()) {
+      user_data_socket_req_.connect(user_data_socket_address);
+    // }
+
+    std::stringstream buffer;
+    msgpack::pack(buffer, data);
+    const auto buffer_str = buffer.str();
+
+    zmq::message_t message{buffer_str.data(), buffer_str.size()};
+
+    std::cout << "Sending the message\n";
+    user_data_socket_req_.send(message, zmq::send_flags::none);
+    std::cout << "Message sent, waiting for a response\n";
+
+    while (not user_data_socket_req_.recv(message).has_value()) {}
+
+    std::cout << "Response on user_data_socket: " << message << '\n';
+
+    return std::vector<unsigned char>(
+        message.data<unsigned char>(),
+        message.data<unsigned char>() + message.size());
+    // TODO: This function should return expected<vect, ec>
+    // TODO: Handle the case of not receiving any data
+  }
+
  private:
+  std::optional<zmq::message_t>
+  handle_handshaker_message(const zmq::message_t& message) {
+    std::size_t offset = 0;
+    auto maybe_type = Unpack<HandshakerMessageType>(
+        message.data<char>(), message.size(), offset);
+    if (not maybe_type) {
+      std::cerr << "Error determining message type from the handshaker "
+          "socket\n";
+      return {};
+    }
+
+    std::stringstream buffer;
+
+    switch (maybe_type.value()) {
+      case HandshakerMessageType::MESSAGE: {
+        std::cout << "Passing handshaker message to peer\n";
+
+        // TODO: Check if the message from the handshaker is DENY or
+        //       BAD_MESSAGE and drop the connection if so.
+
+        buffer.write(message.data<char>() + offset,
+                     message.size() - offset);
+        offset = message.size(); // just in case
+
+        break;
+      }
+      case HandshakerMessageType::KEYS: {
+        std::cout << "Keys received from the handshaker\n";
+
+        auto maybe_keypair =
+            Unpack<EncKeys>(message.data<char>(), message.size(), offset);
+        if (not maybe_keypair) {
+          msgpack::pack(buffer, MessageType::PROTOCOL_ERROR);
+          break;
+        }
+
+        auto& keypair = maybe_keypair.value();
+
+        const auto& enc_key = keypair.get<0>();
+        decryption_ctx = std::move(keypair.get<1>());
+
+        encryption_ctx = crypto::SodiumEncryptionContext{};
+        auto& enc_ctx =
+            std::get<crypto::SodiumEncryptionContext>(encryption_ctx);
+
+        crypto::CryptoHeader enc_header;
+        const auto ec = enc_ctx.Initialize(
+            enc_key.data(), enc_key.size(),
+            enc_header.data(), enc_header.size());
+
+        if (ec) {
+          msgpack::pack(buffer, MessageType::PROTOCOL_ERROR);
+          std::cerr << "Error initializing encryption context for client\n";
+        } else {
+          msgpack::pack(buffer, MessageType::AUTH_CONFIRM);
+          msgpack::pack(buffer, enc_header);
+        }
+
+        break;
+      }
+      case HandshakerMessageType::KEYS_AND_MESSAGE: {
+        std::cout << "Keys and a message received from the handshaker\n";
+
+        auto maybe_keypair =
+            Unpack<EncKeys>(message.data<char>(), message.size(), offset);
+        if (not maybe_keypair) {
+          msgpack::pack(buffer, MessageType::PROTOCOL_ERROR);
+          break;
+        }
+
+        auto& keypair = maybe_keypair.value();
+
+        // We don't need a crypto header yet. We can generate it when we
+        // receive AUTH_CONFIRM.
+
+        encryption_ctx = std::move(keypair.get<0>());
+        decryption_ctx = std::move(keypair.get<1>());
+
+        buffer.write(message.data<char>() + offset,
+                     message.size() - offset);
+        offset = message.size(); // just in case
+
+        break;
+      }
+    }
+
+    const auto buffer_str = buffer.str();
+    return zmq::message_t{buffer_str.data(), buffer_str.size()};
+  }
+
+  static constexpr char user_data_socket_address[] =  "inproc://user-data";
+
   zmq::socket_t socket_;
   zmq::socket_t handshaker_socket_;
-  zmq::socket_t crypto_handshaker_socket_;
 
   std::shared_ptr<Handshaker> handshaker_;
 
-  CryptoKey encryption_key;
-  CryptoKey decryption_key;
+  std::variant<CryptoKey, crypto::SodiumEncryptionContext>
+  encryption_ctx = CryptoKey{};
+  std::variant<CryptoKey, crypto::SodiumDecryptionContext>
+  decryption_ctx = CryptoKey{};
+
+  zmq::socket_t user_data_socket_resp_;
+  zmq::socket_t user_data_socket_req_;
+  std::atomic_bool running_ = false;
 };
 
 #endif /* CLIENT_H */
-
-
-// NOTES:
-// Make a Server class that will be the hub for all connections.
-// It will have a ROUTER socket and will redirect all calls to either the
-// Handshaker (when the client isn't yet authenticated) or Channel that is
-// assigned to the client. It will also filter all unauthenticated requests
-// other than authentication request itself.
-// The server will keep a map storing client data.
-// Client data being its id, authentication status and a Channel object.
-// The Channel and the Handhshaker will talk to the server by ipc sockets.
-// This will let them work asynchronously.
-//
-// Handshaker class that will be passed to the Server in a constructor. It's
-// only objective will be exchanging authentication type data with the Server.
-// When unauthenticated client sends an authentication request, it will be
-// passed to the Handshaker.
-// The Handshaker will need the client's id to track its authentication
-// status, so the server won't strip it. Or maybe it will send it already
-// parsed with msgpack.
-// It seems like the Handshaker will need to be stateful and track all pending
-// authentication processes and forget them after the authentication is
-// completed. The completion message will contain encryption and decryption
-// keys that the Server will pass to the Channel.
-//
-// A new Channel object will be assigned to every client that successfully
-// authenticates with the Handshaker.
-// The Server will pass all messages to it so it can decrypt and encrypt them.
-// It will return either ciphertext that will be sent back to the client or
-// plaintext that will be parsed by the Server.
-// Maybe I should rename it to something like Decryptor or CryptoStream,
-// because in this design the messages don't pass through it. It just encrypts
-// and decrypts stuff. Maybe it shouldn't even be connected to the server with
-// a socket and just be called directly?
-
-// My first thought was for the Channel to be the client-facing object. It
-// would send already decrypted messages to the Server or authentication
-// requests to the Handshaker.
-// But it's not much of a channel if it's a router facing all the clients at
-// once. Is it?
-// Which design is more fool-proof? Probably this one.
-// The Channel would be a hub and the Server would deal only with unencrypted
-// and authenticated messages.
-// So the Channel would be a thing that sits between the outside world and the
-// application. It would handle encryption and decryption and be a dispatch
-// for authentication/handshaking requests and normal, encrypted traffic
-// routed to the Server.
-
-// Making a handshaker for every Channel is a waste. It should probably
-// take a reference or a pointer to one.
-
-
-// Maybe a Client and a Server should just contain Handhshakers, Encryptors
-// and Decryptors.
-// They'd have a ZMQ_ROUTER socket for exchanging info with clients and use
-// these three classes to establish connections and crypto stuff.
-// The rest would be either done in the poll loop or offloaded to some worker.
-
-
-// Encryptor and Decryptor won't be a thing. All servers and clients will use
-// the same encryption scheme. Handshakers will be replacable.

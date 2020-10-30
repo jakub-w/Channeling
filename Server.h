@@ -2,38 +2,47 @@
 #define SERVER_H
 
 #include <algorithm>
+#include <functional>
 #include <iostream>
 #include <memory>
 #include <string_view>
 #include <unordered_map>
 
+#include <variant>
 #include <zmq.h>
 #include <zmq.hpp>
 #include <zmq_addon.hpp>
 
 #include <msgpack.hpp>
 
+#include "SodiumCipherStream.h"
+
 #include "ProtocolCommon.h"
 #include "Util.h"
 
-// #include "Handshaker.h"
-// #include "CryptoBase.h"
-
 template <class Handshaker>
 class Server {
+  using HandshakerMessageType = typename Handshaker::HandshakerMessageType;
+
   struct client_info {
     bool authenticated = false;
-    CryptoKey encryption_key;
-    CryptoKey decryption_key;
+
+    std::variant<CryptoKey, crypto::SodiumEncryptionContext>
+    encryption_ctx = crypto::SodiumEncryptionContext{};
+    std::variant<CryptoKey, crypto::SodiumDecryptionContext>
+    decryption_ctx = CryptoKey{};
   };
 
  public:
+  using Bytes = std::vector<unsigned char>;
+
   Server(zmq::context_t& context,
-         std::shared_ptr<Handshaker> handshaker)
+         std::shared_ptr<Handshaker> handshaker,
+         std::function<Bytes(const Bytes&)>&& message_handler)
       : handshaker_{std::move(handshaker)},
         socket_{context, ZMQ_ROUTER},
         handshaker_socket_{context, ZMQ_PAIR},
-        crypto_handshaker_socket_{context, ZMQ_PAIR} {}
+        user_data_handler_{std::move(message_handler)} {}
 
   constexpr void Bind(std::string_view address) {
     socket_.bind(address.data());
@@ -48,12 +57,10 @@ class Server {
 
     handshaker_->Start();
     handshaker_socket_.connect(handshaker_->GetAddress());
-    crypto_handshaker_socket_.connect(handshaker_->GetCryptoAddress());
 
     std::array<zmq::pollitem_t, 3> items = {{
         {static_cast<void*>(socket_), 0, ZMQ_POLLIN, 0},
-        {static_cast<void*>(handshaker_socket_), 0, ZMQ_POLLIN, 0},
-        {static_cast<void*>(crypto_handshaker_socket_), 0, ZMQ_POLLIN, 0}
+        {static_cast<void*>(handshaker_socket_), 0, ZMQ_POLLIN, 0}
       }};
 
     while (run) {
@@ -68,17 +75,24 @@ class Server {
       if (items[1].revents & ZMQ_POLLIN)  {
         handle_handshaker();
       }
-
-      // handshaker crypto socket
-      if (items[2].revents & ZMQ_POLLIN) {
-        handle_handshaker_crypto();
-      }
     }
 
     std::cout << "Server exiting...\n";
   }
 
  private:
+  inline static void send_msg(zmq::socket_t& socket,
+                              std::string_view client_id, MessageType type) {
+    socket.send(zmq::buffer(client_id), zmq::send_flags::sndmore);
+    socket.send(zmq::buffer(""), zmq::send_flags::sndmore);
+    socket.send(make_msg(type), zmq::send_flags::dontwait);
+  }
+
+  inline std::vector<unsigned char> handle_user_data(
+      const std::vector<unsigned char>& data) {
+    return user_data_handler_(data);
+  }
+
   void handle_incoming() {
     zmq::multipart_t message{socket_};
     std::cout << "Server received message: " << message.str() << '\n';
@@ -107,27 +121,10 @@ class Server {
                       .value_or(MessageType::BAD_MESSAGE);
     std::cout << "Message type: " << MessageTypeName(type) << '\n';
 
-    switch (type) {
-      case MessageType::BAD_MESSAGE:
-        std::cerr << "Protocol error?\n";
-        return;
-      case MessageType::DENY:
-        std::cerr << "Client denied the connection\n";
-        return;
-      case MessageType::ID: {
-        std::stringstream buffer;
-        msgpack::pack(buffer, client_id);
-        const auto buffer_str = buffer.str();
-        message[2].rebuild(buffer_str.data(), buffer_str.size());
-        message.send(socket_);
-        return;
-      }
-      default:
-        break;
-    }
-
     if (not clients[client_id].authenticated
-        and MessageType::AUTH != type) {
+        and (not std::any_of(allowed_before_auth.cbegin(),
+                             allowed_before_auth.cend(),
+                             [=](MessageType t){ return t == type; }))) {
       std::stringstream response_ss;
       msgpack::pack(response_ss, MessageType::DENY);
       std::string response = response_ss.str();
@@ -138,17 +135,245 @@ class Server {
     }
 
     switch (type) {
+      case MessageType::BAD_MESSAGE:
+        std::cerr << "Client sent BAD_MESSGE. Protocol error?\n";
+        message[2] = make_msg(MessageType::ACK);
+        message.send(socket_);
+        return;
+      case MessageType::DENY:
+        std::cerr << "Client denied the connection\n";
+        message[2] = make_msg(MessageType::ACK);
+        message.send(socket_);
+        return;
+      case MessageType::ID: {
+        std::stringstream buffer;
+        msgpack::pack(buffer, client_id);
+        const auto buffer_str = buffer.str();
+        message[2].rebuild(buffer_str.data(), buffer_str.size());
+        message.send(socket_);
+        return;
+      }
       case MessageType::AUTH: {
         message.send(handshaker_socket_);
         std::cout << "Forwarded to the handshaker\n\n";
+        break;
+      }
+      case MessageType::AUTH_CONFIRM: {
+        auto dec_header = Unpack<crypto::CryptoHeader>(
+            message[2].data<char>(), message[2].size(), offset);
+
+        auto& ci = clients[client_id];
+
+        const auto send_protocol_error = [&]{
+          const auto type = MessageType::PROTOCOL_ERROR;
+          message[2].rebuild(&type, sizeof(type));
+          message.send(socket_);
+          clients.erase(client_id);
+        };
+
+        if (not (std::holds_alternative<CryptoKey>(ci.decryption_ctx) and
+                 std::holds_alternative<CryptoKey>(ci.encryption_ctx))) {
+          std::cerr << "Client state is inconsistent. Can't proceed with "
+              "encryption setup\n";
+          send_protocol_error();
+          break;
+        }
+
+        if (not dec_header.has_value()) {
+          std::cerr << "Received malformed encryption header from client\n";
+          send_protocol_error();
+          break;
+        }
+
+        auto dec_key = std::get<CryptoKey>(ci.decryption_ctx);
+
+        ci.decryption_ctx = crypto::SodiumDecryptionContext{};
+        auto& dec_ctx =
+            std::get<crypto::SodiumDecryptionContext>(ci.decryption_ctx);
+
+        auto ec = dec_ctx.Initialize(
+              dec_key.data(), dec_key.size(),
+              dec_header.value().data(), dec_header.value().size());
+        if (ec) {
+          std::cerr << "Protocol error while initializing decryption "
+              "context\n";
+          send_protocol_error();
+          break;
+        }
+
+        auto enc_key = std::get<CryptoKey>(ci.encryption_ctx);
+        ci.encryption_ctx = crypto::SodiumEncryptionContext{};
+        auto& enc_ctx =
+            std::get<crypto::SodiumEncryptionContext>(ci.encryption_ctx);
+
+        crypto::CryptoHeader enc_header;
+        ec = enc_ctx.Initialize(enc_key.data(), enc_key.size(),
+                                enc_header.data(), enc_header.size());
+        if (ec) {
+          std::cerr << "Protocol error while initializing encryption "
+              "context\n";
+          send_protocol_error();
+          break;
+        }
+
+        ci.authenticated = true;
+
+        std::cout << "Sending AUTH_FINISHED to client\n";
+
+        std::stringstream buffer;
+        msgpack::pack(buffer, MessageType::AUTH_FINISHED);
+        msgpack::pack(buffer, enc_header);
+        const auto buffer_str = buffer.str();
+
+        message[2].rebuild(buffer_str.data(), buffer_str.size());
+        message.send(socket_);
+        break;
+      }
+      case MessageType::AUTH_FINISHED: {
+        auto dec_header = Unpack<crypto::CryptoHeader>(
+            message[2].data<char>(), message[2].size(), offset);
+
+        auto& ci = clients[client_id];
+
+        const auto send_protocol_error = [&]{
+          const auto type = MessageType::PROTOCOL_ERROR;
+          message[2].rebuild(&type, sizeof(type));
+          message.send(socket_);
+          clients.erase(client_id);
+        };
+
+        if (not (std::holds_alternative<CryptoKey>(ci.decryption_ctx) and
+                 std::holds_alternative<crypto::SodiumEncryptionContext>(
+                     ci.encryption_ctx))) {
+          std::cerr << "Client state is inconsistent. Can't proceed with "
+              "encryption setup\n";
+          send_protocol_error();
+          break;
+        }
+
+        if (not dec_header.has_value()) {
+          std::cerr << "Received malformed encryption header from client\n";
+          send_protocol_error();
+          break;
+        }
+
+        auto dec_key = std::get<CryptoKey>(ci.decryption_ctx);
+
+        ci.decryption_ctx = crypto::SodiumDecryptionContext{};
+        auto& dec_ctx =
+            std::get<crypto::SodiumDecryptionContext>(ci.decryption_ctx);
+
+        auto ec = dec_ctx.Initialize(
+              dec_key.data(), dec_key.size(),
+              dec_header.value().data(), dec_header.value().size());
+        if (ec) {
+          std::cerr << "Protocol error while initializing decryption "
+              "context\n";
+          send_protocol_error();
+          break;
+        }
+
+        ci.authenticated = true;
+
+        std::stringstream buffer;
+        msgpack::pack(buffer, MessageType::ACK);
+        const auto buffer_str = buffer.str();
+
+        message[2].rebuild(buffer_str.data(), buffer_str.size());
+        message.send(socket_);
+        break;
+      }
+      case MessageType::ENCRYPTED_DATA: {
+        std::cout << "Encrypted data received\n";
+
+        auto& ci = clients[client_id];
+
+        if (not (std::holds_alternative<crypto::SodiumEncryptionContext>(
+                     ci.encryption_ctx) and
+                 std::holds_alternative<crypto::SodiumDecryptionContext>(
+                     ci.decryption_ctx))) {
+          message[2] = make_msg(MessageType::PROTOCOL_ERROR);
+          message.send(socket_);
+          break;
+        }
+        auto& dec_ctx =
+            std::get<crypto::SodiumDecryptionContext>(ci.decryption_ctx);
+
+        auto maybe_ciphertext = Unpack<Bytes>(message[2].data<char>(),
+                                              message[2].size(), offset);
+        if (not maybe_ciphertext) {
+          std::cerr << "Error unpacking ciphertext: "
+                    << maybe_ciphertext.error().message() << '\n';
+          message[2] = make_msg(MessageType::PROTOCOL_ERROR);
+          message.send(socket_);
+          break;
+        }
+
+        const Bytes& ciphertext = maybe_ciphertext.value();
+
+        static_assert(sizeof(char) == sizeof(crypto::byte));
+        auto maybe_cleartext = dec_ctx.Decrypt(ciphertext);
+
+        if (std::holds_alternative<std::error_code>(maybe_cleartext)) {
+          auto ec = std::get<std::error_code>(maybe_cleartext);
+          if (ec == std::errc::bad_message or
+              ec == std::errc::operation_not_permitted){
+            std::cerr << "PROTOCOL_ERROR on Decrypt()\n";
+            std::cerr << ec << '\n';
+            message[2] = make_msg(MessageType::PROTOCOL_ERROR);
+          } else if (ec == std::errc::invalid_argument){
+            std::cerr << "Bad argument for Decrypt()\n";
+            message[2] = make_msg(MessageType::PROTOCOL_ERROR);
+          } else if (ec == std::errc::connection_aborted){
+            std::cerr << "Connection aborted on Decrypt()\n";
+            message[2] = make_msg(MessageType::ACK);
+          }
+          message.send(socket_);
+          break;
+        }
+
+        const auto& cleartext = std::get<crypto::Bytes>(maybe_cleartext);
+
+        Bytes cleartext_response;
+        try {
+          cleartext_response = handle_user_data(cleartext);
+        } catch (const std::exception& e) {
+          std::cerr << "Throw in the user's message handler: "
+                    << e.what() << '\n';
+          message[2] = make_msg(MessageType::PROTOCOL_ERROR);
+          message.send(socket_);
+          break;
+        } catch (...) {
+          std::cerr << "Throw in the user's message handler. Type of the "
+              "exception unknown, so no more data provided.\n";
+          message[2] = make_msg(MessageType::PROTOCOL_ERROR);
+          message.send(socket_);
+          break;
+        }
+
+        auto& enc_ctx =
+            std::get<crypto::SodiumEncryptionContext>(ci.encryption_ctx);
+        const auto enc_result = enc_ctx.Encrypt(cleartext_response);
+        if (std::holds_alternative<std::error_code>(enc_result)) {
+          // auto ec = std::get<std::error_code>(enc_result);
+          std::cerr << "Error encrypting data\n";
+
+          message[2] = make_msg(MessageType::PROTOCOL_ERROR);
+          message.send(socket_);
+          break;
+        }
+
+        message[2] = make_msg(MessageType::ENCRYPTED_DATA,
+                              std::get<crypto::Bytes>(enc_result));
+        message.send(socket_);
+
         break;
       }
       default: {
         std::cerr << "Unhandled message type: "
                   << MessageTypeName(type) << "\n\n";
 
-        const auto type = MessageType::BAD_MESSAGE;
-        message[2].rebuild(&type, sizeof(type));
+        message[2] = make_msg(MessageType::BAD_MESSAGE);
         message.send(socket_);
         break;
       }
@@ -166,53 +391,117 @@ class Server {
     std::cout << "Server: message from the handshaker. "
         "Passing to the client...\n\n";
     zmq::multipart_t message(handshaker_socket_);
-    message.send(socket_);
-  }
 
-  void handle_handshaker_crypto() {
-    // Messages arriving on this socket are only messages containing
-    // sensitive crypto data. The message received here implies that the
-    // client authorization succeeded and the handshaker successfully
-    // established cryptographic keys with the client.
+    assert(message.size() == 3);
 
-    std::cout << "Server: message from the crypto handshaker socket.";
+    std::size_t offset = 0;
+    auto type = Unpack<HandshakerMessageType>(
+        message[2].data<char>(), message[2].size(), offset);
 
-    zmq::multipart_t message(crypto_handshaker_socket_);
-    std::cout << message.str() << "\n";
+    assert(type.has_value());
 
-    const std::string
-        client_id{message[0].data<char>(), message[0].size()};
+    const std::string client_id{
+          message[0].data<char>(), message[0].size()};
+    assert(not client_id.empty());
 
-    {
-      auto keypair =
-          Unpack<msgpack::type::tuple<CryptoKey, CryptoKey>>(
-              message[2].data<char>(), message[2].size())
-          .value();
+    std::stringstream buffer;
 
-      client_info& ci = clients[client_id];
-      ci.authenticated = true;
-      ci.encryption_key = std::move(keypair.get<0>());
-      ci.decryption_key = std::move(keypair.get<1>());
+    switch (type.value()) {
+      case HandshakerMessageType::MESSAGE: {
+        std::cout << "Passing message to peer\n";
+
+        buffer.write(message[2].data<char>() + offset,
+                     message[2].size() - offset);
+        offset = message[2].size(); // just in case
+
+        break;
+      }
+      case HandshakerMessageType::KEYS: {
+        std::cout << "Keys received from the handshaker\n";
+
+        auto maybe_keypair = Unpack<EncKeys>(message[2].data<char>(),
+                                             message[2].size(),
+                                             offset);
+        if (not maybe_keypair) {
+          send_msg(socket_, client_id, MessageType::PROTOCOL_ERROR);
+          return;
+        }
+
+        auto& keypair = maybe_keypair.value();
+
+        client_info& ci = clients[client_id];
+
+        const auto& enc_key = keypair.get<0>();
+        ci.decryption_ctx = std::move(keypair.get<1>());
+
+        auto& enc_ctx =
+            std::get<crypto::SodiumEncryptionContext>(ci.encryption_ctx);
+
+        crypto::CryptoHeader enc_header;
+        const auto ec = enc_ctx.Initialize(
+            enc_key.data(), enc_key.size(),
+            enc_header.data(), enc_header.size());
+
+        if (ec) {
+          msgpack::pack(buffer, MessageType::PROTOCOL_ERROR);
+          std::cerr << "Error initializing encryption context for client\n";
+        } else {
+          msgpack::pack(buffer, MessageType::AUTH_CONFIRM);
+          msgpack::pack(buffer, enc_header);
+        }
+
+        break;
+      }
+      case HandshakerMessageType::KEYS_AND_MESSAGE: {
+        std::cout << "Keys and a message received from the handshaker\n";
+
+        auto maybe_keypair = Unpack<EncKeys>(message[2].data<char>(),
+                                             message[2].size(),
+                                             offset);
+        if (not maybe_keypair) {
+          std::cerr << "Protocol error!\n";
+          send_msg(socket_, client_id, MessageType::PROTOCOL_ERROR);
+          return;
+        }
+
+        auto& keypair = maybe_keypair.value();
+
+        client_info& ci = clients[client_id];
+
+        // We don't need a crypto header yet. We can generate it when we
+        // receive AUTH_CONFIRM.
+
+        ci.encryption_ctx = std::move(keypair.get<0>());
+        ci.decryption_ctx = std::move(keypair.get<1>());
+
+        buffer.write(message[2].data<char>() + offset,
+                     message[2].size() - offset);
+        offset = message[2].size(); // just in case
+
+        break;
+      }
     }
 
-    // Don't reuse the message to be sure no sensitive data leaks on the
-    // line.
-    // Don't encrypt the confirmation message. Every message after this
-    // one will be encrypted though.
-
+    // Don't reuse the message to be sure no sensitive data leaks on the line.
     socket_.send(zmq::buffer(client_id), zmq::send_flags::sndmore);
     socket_.send(zmq::const_buffer("", 0), zmq::send_flags::sndmore);
 
-    std::stringstream buffer;
-    msgpack::pack(buffer, MessageType::AUTH_CONFIRM);
     const auto buffer_str = buffer.str();
     socket_.send(zmq::const_buffer(buffer_str.data(), buffer_str.size()),
                  zmq::send_flags::dontwait);
-
-    std::cout << "Sent AUTH_CONFIRM to the client\n\n";
+    std::cout << "Message sent to the client\n";
   }
 
   // -------------------- PRIVATE FIELDS --------------------
+  static constexpr std::array allowed_before_auth = {
+    MessageType::AUTH,
+    MessageType::AUTH_CONFIRM,
+    MessageType::AUTH_FINISHED,
+    MessageType::ID,
+    MessageType::PROTOCOL_ERROR,
+    MessageType::BAD_MESSAGE,
+    MessageType::DENY
+  };
 
   std::atomic_bool run = false;
 
@@ -220,24 +509,10 @@ class Server {
 
   zmq::socket_t socket_;
   zmq::socket_t handshaker_socket_;
-  zmq::socket_t crypto_handshaker_socket_;
 
   std::unordered_map<std::string, client_info> clients;
+
+  std::function<Bytes(const Bytes&)> user_data_handler_;
 };
 
 #endif /* SERVER_H */
-
-
-// The handshaker should have two sockets: one for passing messages to the
-// client, and the second one for passing encryption keys to the server.
-// All messages received by the server from the first socket would be passed
-// to the client unchanged.
-// Messages from the second socket would authenticate the connection.
-// To prevent inconsistent state between server and the client, the last
-// message about confirming the authentication would be sent only over the
-// second socket and the server would react by setting encryption keys,
-// setting auth status and sending the proper response to the client.
-
-// Messages should be encrypted. How can we differentiate between encrypted
-// and AUTH messages? Send a flag as a first part of the message, specifying
-// it? How would it differ from sending the MessageType unencrypted?

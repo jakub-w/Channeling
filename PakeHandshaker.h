@@ -19,6 +19,9 @@ class PakeHandshaker : public Handshaker<PakeHandshaker> {
   // FIXME: Use a class based on std::array, but that zeroes its memory on
   //        move.
   using EncryptionKey = std::array<byte, NA_SS_KEYBYTES>;
+  using NextResult = std::variant<PartialMessage,
+                                  EncKeys,
+                                  std::pair<PartialMessage, EncKeys>>;
 
   class Requester {
     struct loc_keys_generated {};
@@ -47,12 +50,10 @@ class PakeHandshaker : public Handshaker<PakeHandshaker> {
           privkey2_{privkey2},
           pubkey1_{pubkey1}, pubkey2_{pubkey2} {}
 
-    std::variant<zmq::message_t, EncKeys>
-    Next(const char* data, std::size_t size) {
+    NextResult Next(const char* data, std::size_t size) {
       return std::visit(
           overload{
-            [&, data, size](loc_keys_generated&) ->
-            std::variant<zmq::message_t, EncKeys> {
+            [&, data, size](loc_keys_generated&) -> NextResult {
               auto new_state = all_received{};
               std::size_t offset = 0;
 
@@ -65,7 +66,7 @@ class PakeHandshaker : public Handshaker<PakeHandshaker> {
 
               if (not (peer_pubkey1 and peer_pubkey2 and peer_pubkey3 and
                        peer_zkp1 and peer_zkp2 and peer_zkp3)) {
-                return make_msg(MessageType::BAD_MESSAGE);
+                return pack_message_type(MessageType::BAD_MESSAGE);
               }
 
               new_state.peer_id = peer_zkp1.value().user_id;
@@ -75,7 +76,7 @@ class PakeHandshaker : public Handshaker<PakeHandshaker> {
                        check_zkp(peer_zkp2.value(), peer_pubkey2.value(),
                                  new_state.peer_id, id_))) {
                 // TODO: Report denied request
-                return make_msg(MessageType::DENY);
+                return pack_message_type(MessageType::DENY);
               }
 
               // Last zkp has a different generator.
@@ -90,14 +91,14 @@ class PakeHandshaker : public Handshaker<PakeHandshaker> {
               if (not crypto_core_ristretto255_is_valid_point(
                       peer_zkp_gen.data())) {
                 // TODO: Report denied request
-                return make_msg(MessageType::DENY);
+                return pack_message_type(MessageType::DENY);
               }
 
               if (not check_zkp(peer_zkp3.value(), peer_pubkey3.value(),
                                 new_state.peer_id, id_,
                                 peer_zkp_gen)) {
                 // TODO: Report denied request
-                return make_msg(MessageType::DENY);
+                return pack_message_type(MessageType::DENY);
               }
 
               // Send pubkey3 and ZKP for it.
@@ -117,7 +118,7 @@ class PakeHandshaker : public Handshaker<PakeHandshaker> {
                       pubkey3.data(), privkey3.data(), zkp_gen.data())) {
                 // TODO: This is a protocol error. Maybe don't just deny but
                 //       rather tell the peer to drop the session and restart.
-                return make_msg(MessageType::DENY);
+                return pack_message_type(MessageType::DENY);
               }
 
               const auto zkp3 = make_zkp(id_, privkey3, pubkey3, zkp_gen);
@@ -133,7 +134,7 @@ class PakeHandshaker : public Handshaker<PakeHandshaker> {
                 //       a point in make_key_material() returned the zero
                 //       element.
                 // TODO: Report denied request
-                return make_msg(MessageType::DENY);
+                return pack_message_type(MessageType::DENY);
               }
 
               // Key confirmation
@@ -159,17 +160,15 @@ class PakeHandshaker : public Handshaker<PakeHandshaker> {
               msgpack::pack(buffer, pubkey3);
               msgpack::pack(buffer, zkp3);
               msgpack::pack(buffer, kc);
-              const auto buffer_str = buffer.str();
 
               new_state.peer_pubkey1 = std::move(peer_pubkey1.value());
               new_state.peer_pubkey2 = std::move(peer_pubkey2.value());
 
               state_ = std::move(new_state);
 
-              return zmq::message_t{buffer_str.data(), buffer_str.size()};
+              return buffer.str();
             },
-            [&, data, size](all_received& context) ->
-            std::variant<zmq::message_t, EncKeys> {
+            [&, data, size](all_received& context) -> NextResult {
               // TODO: Receive key confirmation data from peer.
               std::size_t offset = 0;
 
@@ -183,19 +182,18 @@ class PakeHandshaker : public Handshaker<PakeHandshaker> {
                                     id_, pubkey1_, pubkey2_);
               if (peer_kc != expected_peer_kc) {
                 // TODO: Report denied request
-                return make_msg(MessageType::DENY);
+                return pack_message_type(MessageType::DENY);
               }
 
-              auto result =  msgpack::type::tuple<CryptoKey, CryptoKey>{
+              auto result = EncKeys{
                 std::move(context.enc_key), std::move(context.dec_key)};
 
               state_ = finished{};
 
               return result;
             },
-            [](finished&) ->
-            std::variant<zmq::message_t, EncKeys> {
-              return make_msg(MessageType::BAD_MESSAGE);
+            [](finished&) -> NextResult {
+              return pack_message_type(MessageType::BAD_MESSAGE);
             }
           },
           state_);
@@ -213,14 +211,10 @@ class PakeHandshaker : public Handshaker<PakeHandshaker> {
   class Responder {
     struct start {};
     struct first_keys_received {};
-    struct crypto_keys_generated {
-      CryptoKey enc_key, dec_key;
-    };
     struct finished {};
 
     using State = std::variant<start,
                                first_keys_received,
-                               crypto_keys_generated,
                                finished>;
     State state_ = start{};
 
@@ -229,12 +223,10 @@ class PakeHandshaker : public Handshaker<PakeHandshaker> {
         : id_{id},
           secret_{secret} {}
 
-    std::variant<zmq::message_t, EncKeys>
-    Next(const char* data, std::size_t size) {
+    NextResult Next(const char* data, std::size_t size) {
       return std::visit(
           overload{
-            [&, data, size](start&) ->
-            std::variant<zmq::message_t, EncKeys> {
+            [&, data, size](start&) -> NextResult {
               // id_ = server_id_;
 
               std::size_t offset = 0;
@@ -247,7 +239,7 @@ class PakeHandshaker : public Handshaker<PakeHandshaker> {
 
                 if (not (peer_pubkey1 and peer_pubkey2 and
                          peer_zkp1 and peer_zkp2)) {
-                  return make_msg(MessageType::BAD_MESSAGE);
+                  return pack_message_type(MessageType::BAD_MESSAGE);
                 }
 
                 peer_id_ = peer_zkp1.value().user_id;
@@ -258,7 +250,7 @@ class PakeHandshaker : public Handshaker<PakeHandshaker> {
                                    peer_id_, id_) and
                          check_zkp(peer_zkp2.value(), peer_pubkey2.value(),
                                    peer_id_, id_))) {
-                  return make_msg(MessageType::DENY);
+                  return pack_message_type(MessageType::DENY);
                 }
 
                 peer_pubkey1_ = std::move(peer_pubkey1.value());
@@ -285,7 +277,7 @@ class PakeHandshaker : public Handshaker<PakeHandshaker> {
               if (crypto_scalarmult_ristretto255(
                       pubkey3.data(), privkey3.data(), zkp_gen.data())
                   != 0) {
-                return make_msg(MessageType::DENY);
+                return pack_message_type(MessageType::DENY);
               }
 
               const auto zkp3 =
@@ -308,14 +300,11 @@ class PakeHandshaker : public Handshaker<PakeHandshaker> {
               msgpack::pack(buffer, zkp2);
               msgpack::pack(buffer, zkp3);
 
-              auto buffer_str = buffer.str();
-
               state_ = first_keys_received{};
 
-              return zmq::message_t{buffer_str.data(), buffer_str.size()};
+              return buffer.str();
             },
-            [&, data, size](first_keys_received&) ->
-            std::variant<zmq::message_t, EncKeys> {
+            [&, data, size](first_keys_received&) -> NextResult {
               std::size_t offset = 0;
 
               auto peer_pubkey3 = Unpack<EcPoint>(data, size, offset);
@@ -323,7 +312,7 @@ class PakeHandshaker : public Handshaker<PakeHandshaker> {
               auto peer_kc = Unpack<HmacHash>(data, size, offset);
 
               if (not (peer_pubkey3 and peer_zkp3 and peer_kc)) {
-                return make_msg(MessageType::BAD_MESSAGE);
+                return pack_message_type(MessageType::BAD_MESSAGE);
               }
 
               // Verify
@@ -341,7 +330,7 @@ class PakeHandshaker : public Handshaker<PakeHandshaker> {
                    check_zkp(
                        peer_zkp3.value(), peer_pubkey3.value(),
                        peer_id_, id_, peer_zkp_gen))) {
-                return make_msg(MessageType::DENY);
+                return pack_message_type(MessageType::DENY);
               }
 
               // Compute the session key material
@@ -355,7 +344,7 @@ class PakeHandshaker : public Handshaker<PakeHandshaker> {
                 //       a point in make_key_material() returned the zero
                 //       element.
                 // TODO: Report denied request
-                return make_msg(MessageType::DENY);
+                return pack_message_type(MessageType::DENY);
               }
 
               // Key confirmation
@@ -363,12 +352,11 @@ class PakeHandshaker : public Handshaker<PakeHandshaker> {
               HmacKey kc_key;
               // Generate an encryption keys: EK = KDF(K || 3 || "JW_KGEN")
               //                              DK = KDF(K || 2 || "JW_KGEN")
-              crypto_keys_generated new_state{};
 
+              CryptoKey enc_key, dec_key;
               // The order of args is important! Note that dec_key and enc_key
               // are in inverted order to the one in connect().
-              derive_keys(key_material.value(), kc_key,
-                          new_state.dec_key, new_state.enc_key);
+              derive_keys(key_material.value(), kc_key, dec_key, enc_key);
 
               // Verify the received key confirmation data.
               const auto expected_peer_kc =
@@ -377,7 +365,7 @@ class PakeHandshaker : public Handshaker<PakeHandshaker> {
                   peer_id_, peer_pubkey1_, peer_pubkey2_,
                   id_, pubkey1_, pubkey2_);
               if (peer_kc != expected_peer_kc) {
-                return make_msg(MessageType::DENY);
+                return pack_message_type(MessageType::DENY);
               }
 
               // Generate the key confirmation data
@@ -393,24 +381,14 @@ class PakeHandshaker : public Handshaker<PakeHandshaker> {
               msgpack::pack(buffer, MessageType::AUTH);
               msgpack::pack(buffer, kc);
 
-              const auto buffer_str = buffer.str();
-
-              state_ = std::move(new_state);
-
-              return zmq::message_t{buffer_str.data(), buffer_str.size()};
-            },
-            [this](crypto_keys_generated& context) ->
-            std::variant<zmq::message_t, EncKeys> {
-              auto result = EncKeys{std::move(context.enc_key),
-                                    std::move(context.dec_key)};
-
               state_ = finished{};
 
-              return result;
+              return std::pair{
+                buffer.str(),
+                EncKeys{std::move(enc_key), std::move(dec_key)}};
             },
-            [](finished&) ->
-            std::variant<zmq::message_t, EncKeys> {
-              return make_msg(MessageType::BAD_MESSAGE);
+            [](finished&) -> NextResult {
+              return pack_message_type(MessageType::BAD_MESSAGE);
             }
           },
           state_);
@@ -440,14 +418,13 @@ class PakeHandshaker : public Handshaker<PakeHandshaker> {
   PakeHandshaker(zmq::context_t& context,
                  std::string_view password)
       : socket_{context, ZMQ_PAIR},
-        crypto_socket_{context, ZMQ_PAIR},
         secret_{make_secret(password)},
         server_id_(5, ' ') {
     randombytes_buf(server_id_.data(), server_id_.length());
   }
 
-  PakeHandshaker(const StupidHandshaker&) = delete;
-  PakeHandshaker operator=(const StupidHandshaker&) = delete;
+  PakeHandshaker(const PakeHandshaker&) = delete;
+  PakeHandshaker operator=(const PakeHandshaker&) = delete;
 
   ~PakeHandshaker() {
     Stop();
@@ -484,7 +461,6 @@ class PakeHandshaker : public Handshaker<PakeHandshaker> {
   void worker() {
     try {
       socket_.bind(address_);
-      crypto_socket_.bind(crypto_address_);
     } catch (const zmq::error_t& e) {
       std::cerr << "Zmq exception thrown on bind(): " << e.what() << '\n';
       return;
@@ -538,35 +514,54 @@ class PakeHandshaker : public Handshaker<PakeHandshaker> {
           context);
 
         std::visit(overload{
-            [&](zmq::message_t&) {
-              message[2].swap(std::get<zmq::message_t>(result));
+            [&](PartialMessage& msg) {
+              // Just send the message
+
+              msgpack::pack(buffer, HandshakerMessageType::MESSAGE);
+              buffer << msg;
+              const auto buffer_str = buffer.str();
+
+              message[2].rebuild(buffer_str.data(), buffer_str.size());
 
               std::cout << "Sending back:\n";
               std::cout << message.str() << "\n\n";
-
-              message.send(socket_);
             },
-            [&](EncKeys&) {
-              msgpack::pack(buffer, std::get<EncKeys>(result));
+            [&](EncKeys& keys) {
+              // Send just the keys on the socket
+
+              contexts.erase(client_id);
+              msgpack::pack(buffer, HandshakerMessageType::KEYS);
+              msgpack::pack(buffer, keys);
               const auto buffer_str = buffer.str();
               message[2].rebuild(buffer_str.data(), buffer_str.size());
 
-              std::cout << "Crypto socket:\n";
+              std::cout << "Sending crypto keys:\n";
               std::cout << message.str() << "\n\n";
+            },
+            [&](std::pair<PartialMessage, EncKeys>& pair) {
+              // Send the message and the keys
 
-              message.send(crypto_socket_);
+              const auto& msg = pair.first;
+              const auto& keys = pair.second;
+              assert(not msg.empty()
+                     and not keys.get<0>().empty()
+                     and not keys.get<1>().empty());
+
+              msgpack::pack(buffer, HandshakerMessageType::KEYS_AND_MESSAGE);
+              msgpack::pack(buffer, keys);
+              buffer << msg;
+              const auto buffer_str = buffer.str();
+              message[2].rebuild(buffer_str.data(), buffer_str.size());
+
+              std::cout << "Sending crypto keys and a message:";
+              std::cout << message.str() << "\n\n";
             }},
           result);
+
+        message.send(socket_);
       }
     }
     std::cout << "Handshaker stopped\n";
-  }
-
-  static zmq::message_t make_msg(MessageType type) {
-    std::stringstream buffer;
-    msgpack::pack(buffer, type);
-    const auto buffer_str = buffer.str();
-    return zmq::message_t(buffer_str.data(), buffer_str.size());
   }
 
   static std::optional<EcPoint> make_key_material(
@@ -602,7 +597,6 @@ class PakeHandshaker : public Handshaker<PakeHandshaker> {
   static size_t auth_number;
 
   zmq::socket_t socket_;
-  zmq::socket_t crypto_socket_;
 
   // std::atomic_bool listening = false;
   // std::thread thread_;

@@ -16,6 +16,13 @@
 template <typename T>
 class Channel;
 
+namespace {
+enum class HandshakerMessageType_internal {
+    MESSAGE,
+    KEYS,
+    KEYS_AND_MESSAGE
+  };
+}
 
 // The messages handshaker receives are zmq multipart messages. The first
 // frame is a client id, the second one is empty, the third one contains
@@ -24,9 +31,10 @@ class Channel;
 template <typename T>
 class Handshaker {
  public:
+  using HandshakerMessageType = HandshakerMessageType_internal;
+
   constexpr Handshaker()
-      : address_{address_base() + std::to_string(socknum_++)},
-        crypto_address_{address_base() + std::to_string(socknum_++)} {}
+      : address_{address_base() + std::to_string(socknum_++)} {}
 
   ~Handshaker() {
     Stop();
@@ -50,17 +58,12 @@ class Handshaker {
     return address_;
   }
 
-  inline constexpr const std::string& GetCryptoAddress() const {
-    return crypto_address_;
-  }
-
  protected:
   inline constexpr void worker() {
     static_cast<T*>(this)->worker();
   }
 
   const std::string address_;
-  const std::string crypto_address_;
 
   std::atomic_bool listening = false;
 
@@ -77,14 +80,17 @@ class Handshaker {
 
   friend class Channel<T>;
 };
+
 template <typename T>
 size_t Handshaker<T>::socknum_ = 0;
+
+MSGPACK_ADD_ENUM(HandshakerMessageType_internal);
+
 
 class StupidHandshaker : public Handshaker<StupidHandshaker> {
  public:
   StupidHandshaker(zmq::context_t& context, std::string_view password)
       : socket_{context, ZMQ_PAIR},
-        crypto_socket_{context, ZMQ_PAIR},
         password_{password} {}
 
   StupidHandshaker(const StupidHandshaker&) = delete;
@@ -118,7 +124,6 @@ class StupidHandshaker : public Handshaker<StupidHandshaker> {
   void worker() {
     try {
       socket_.bind(address_);
-      crypto_socket_.bind(crypto_address_);
     } catch (const zmq::error_t& e) {
       std::cerr << "Zmq exception thrown on bind(): " << e.what() << '\n';
       return;
@@ -156,14 +161,15 @@ class StupidHandshaker : public Handshaker<StupidHandshaker> {
 
           if (maybe_password and
               maybe_password.value() == password_) {
-            std::stringstream ss;
             msgpack::type::tuple<CryptoKey, CryptoKey> keypair;
-            msgpack::pack(ss, keypair);
 
-            std::string message_str = ss.str();
-            message[2].rebuild(message_str.data(), message_str.size());
+            std::stringstream buffer;
+            msgpack::pack(buffer, HandshakerMessageType::KEYS);
+            msgpack::pack(buffer, keypair);
+            const std::string buffer_str = buffer.str();
+            message[2].rebuild(buffer_str.data(), buffer_str.size());
 
-            message.send(crypto_socket_);
+            message.send(socket_);
           } else {
             std::stringstream ss;
 
@@ -189,7 +195,6 @@ class StupidHandshaker : public Handshaker<StupidHandshaker> {
   }
 
   zmq::socket_t socket_;
-  zmq::socket_t crypto_socket_; // Used for sending cryptographic keys
   const std::string password_;
 
   // std::thread thread_;
@@ -199,7 +204,3 @@ class StupidHandshaker : public Handshaker<StupidHandshaker> {
 };
 
 #endif /* HANDSHAKER_H */
-
-// NOTES:
-// Maybe the Handshaker should be a template class that takes Protocol
-// template.

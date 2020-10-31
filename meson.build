@@ -16,7 +16,7 @@
 # along with Lelo Remote Music Player. If not, see
 # <https://www.gnu.org/licenses/>.
 
-project('zeromq-protocol', 'cpp',
+project('channeling', 'cpp',
         default_options: ['cpp_std=c++17'])
 
 # Build types

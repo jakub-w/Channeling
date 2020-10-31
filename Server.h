@@ -33,7 +33,7 @@
 
 #include <msgpack.hpp>
 
-#include "SodiumCipherStream.h"
+#include "SodiumCipherStream/SodiumCipherStream.h"
 
 #include "ProtocolCommon.h"
 #include "Util.h"

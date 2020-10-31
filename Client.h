@@ -31,10 +31,11 @@
 #include <zmq.hpp>
 #include <zmq_addon.hpp>
 
-#include "SodiumCipherStream.h"
+#include "SodiumCipherStream/SodiumCipherStream.h"
 
 #include "ProtocolCommon.h"
 #include "Util.h"
+
 #include "msgpack/v3/unpack_decl.hpp"
 #include "tl/expected.hpp"
 

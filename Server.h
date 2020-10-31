@@ -54,7 +54,7 @@ class Server {
  public:
   Server(zmq::context_t& context,
          std::shared_ptr<Handshaker> handshaker,
-         std::function<Bytes(const Bytes&)>&& message_handler)
+         std::function<Bytes(Bytes&&)>&& message_handler)
       : handshaker_{std::move(handshaker)},
         socket_{context, ZMQ_ROUTER},
         handshaker_socket_{context, ZMQ_PAIR},
@@ -104,8 +104,8 @@ class Server {
     socket.send(make_msg(type), zmq::send_flags::dontwait);
   }
 
-  inline Bytes handle_user_data(const Bytes& data) {
-    return user_data_handler_(data);
+  inline Bytes handle_user_data(Bytes&& data) {
+    return user_data_handler_(std::move(data));
   }
 
   void handle_incoming() {
@@ -335,11 +335,10 @@ class Server {
           break;
         }
 
-        const auto& cleartext = std::get<crypto::Bytes>(maybe_cleartext);
-
         Bytes cleartext_response;
         try {
-          cleartext_response = handle_user_data(cleartext);
+          cleartext_response = handle_user_data(
+              std::move(std::get<crypto::Bytes>(maybe_cleartext)));
         } catch (const std::exception& e) {
           std::cerr << "Throw in the user's message handler: "
                     << e.what() << '\n';
@@ -515,7 +514,7 @@ class Server {
 
   std::unordered_map<std::string, client_info> clients;
 
-  std::function<Bytes(const Bytes&)> user_data_handler_;
+  std::function<Bytes(Bytes&&)> user_data_handler_;
 };
 
 #endif /* SERVER_H */

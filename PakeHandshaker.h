@@ -489,7 +489,12 @@ class PakeHandshaker : public Handshaker<PakeHandshaker> {
       }};
 
     while (listening) {
-      zmq::poll(items.data(), items.size(), std::chrono::milliseconds(500));
+      try {
+        zmq::poll(items.data(), items.size(), std::chrono::milliseconds(500));
+      } catch (const zmq::error_t& e) {
+        std::cout << "Handshaker poll error: " << e.what() << '\n';
+        break;
+      }
 
       if (items[0].revents & ZMQ_POLLIN) {
         std::size_t offset = 0;

@@ -60,11 +60,16 @@ class Server {
         handshaker_socket_{context, ZMQ_PAIR},
         user_data_handler_{std::move(message_handler)} {}
 
+  ~Server() {
+    Close();
+  }
+
   constexpr void Bind(std::string_view address) {
     socket_.bind(address.data());
   }
 
   constexpr void Close() {
+    handshaker_->Stop();
     run = false;
   }
 
@@ -80,7 +85,12 @@ class Server {
       }};
 
     while (run) {
-      zmq::poll(items.data(), items.size(), std::chrono::milliseconds(500));
+      try {
+        zmq::poll(items.data(), items.size(), std::chrono::milliseconds(500));
+      } catch (const zmq::error_t& e) {
+        std::cout << "Run() poll error: " << e.what() << '\n';
+        break;
+      }
 
       // router socket (external, incoming messages)
       if (items[0].revents & ZMQ_POLLIN) {

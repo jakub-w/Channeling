@@ -30,7 +30,7 @@ The library is considered to be in pre-alpha, unstable state. Everything may cha
 
     Server server(ctx, handshaker, message_handler);
 
-    // Bind to ZeroMQ address, could be "tcp://1.2.3.4" for network address
+    // Bind to ZeroMQ address, could be "tcp://1.2.3.4:5678" for network address
     server.Bind("ipc://zeromq-server");
     server.Run(); // never exits
   }

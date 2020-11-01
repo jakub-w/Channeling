@@ -25,7 +25,7 @@
 #include "PakeHandshaker.h"
 #include "Server.h"
 
-zmq::context_t ctx;
+auto ctx = std::make_shared<zmq::context_t>();
 // auto handshaker = std::make_shared<StupidHandshaker>(ctx, "password");
 auto handshaker = std::make_shared<PakeHandshaker>(ctx, "password");
 const auto message_handler = [](const Bytes& data) {

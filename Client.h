@@ -44,13 +44,15 @@ class Client {
   using HandshakerMessageType = typename Handshaker::HandshakerMessageType;
 
  public:
-  Client(zmq::context_t& context, std::shared_ptr<Handshaker> handshaker)
+  Client(std::shared_ptr<zmq::context_t> context,
+         std::shared_ptr<Handshaker> handshaker)
       noexcept
-      : socket_{context, ZMQ_REQ},
-        handshaker_socket_{context, ZMQ_PAIR},
+      : ctx_{std::move(context)},
+        socket_{*ctx_, ZMQ_REQ},
+        handshaker_socket_{*ctx_, ZMQ_PAIR},
         handshaker_{std::move(handshaker)},
-        user_data_socket_resp_{context, ZMQ_PAIR},
-        user_data_socket_req_{context, ZMQ_PAIR}
+        user_data_socket_resp_{*ctx_, ZMQ_PAIR},
+        user_data_socket_req_{*ctx_, ZMQ_PAIR}
   {}
 
   ~Client() noexcept {
@@ -514,6 +516,7 @@ class Client {
 
   static constexpr char user_data_socket_address[] =  "inproc://user-data";
 
+  std::shared_ptr<zmq::context_t> ctx_;
   zmq::socket_t socket_;
   zmq::socket_t handshaker_socket_;
 

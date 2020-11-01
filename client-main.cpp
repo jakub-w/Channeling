@@ -25,7 +25,7 @@
 #include "Util.h"
 
 int main() {
-  zmq::context_t ctx;
+  auto ctx = std::make_shared<zmq::context_t>();
 
   // Client client{ctx, std::make_shared<StupidHandshaker>(ctx, "password")};
   Client client{ctx, std::make_shared<PakeHandshaker>(ctx, "password")};

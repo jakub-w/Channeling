@@ -52,12 +52,13 @@ class Server {
   };
 
  public:
-  Server(zmq::context_t& context,
+  Server(std::shared_ptr<zmq::context_t> context,
          std::shared_ptr<Handshaker> handshaker,
          std::function<Bytes(Bytes&&)>&& message_handler)
-      : handshaker_{std::move(handshaker)},
-        socket_{context, ZMQ_ROUTER},
-        handshaker_socket_{context, ZMQ_PAIR},
+      : ctx_{std::move(context)},
+        handshaker_{std::move(handshaker)},
+        socket_{*ctx_, ZMQ_ROUTER},
+        handshaker_socket_{*ctx_, ZMQ_PAIR},
         user_data_handler_{std::move(message_handler)} {}
 
   ~Server() {
@@ -517,6 +518,7 @@ class Server {
 
   std::atomic_bool run = false;
 
+  std::shared_ptr<zmq::context_t> ctx_;
   std::shared_ptr<Handshaker> handshaker_;
 
   zmq::socket_t socket_;

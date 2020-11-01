@@ -433,9 +433,10 @@ class PakeHandshaker : public Handshaker<PakeHandshaker> {
   };
 
   // id will be used when the handshaker is on the server side.
-  PakeHandshaker(zmq::context_t& context,
+  PakeHandshaker(std::shared_ptr<zmq::context_t> context,
                  std::string_view password)
-      : socket_{context, ZMQ_PAIR},
+      : ctx_{std::move(context)},
+        socket_{*ctx_, ZMQ_PAIR},
         secret_{make_secret(password)},
         server_id_(5, ' ') {
     randombytes_buf(server_id_.data(), server_id_.length());
@@ -619,6 +620,7 @@ class PakeHandshaker : public Handshaker<PakeHandshaker> {
 
   static size_t auth_number;
 
+  std::shared_ptr<zmq::context_t> ctx_;
   zmq::socket_t socket_;
 
   // std::atomic_bool listening = false;

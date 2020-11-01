@@ -107,8 +107,10 @@ MSGPACK_ADD_ENUM(HandshakerMessageType_internal);
 
 class StupidHandshaker : public Handshaker<StupidHandshaker> {
  public:
-  StupidHandshaker(zmq::context_t& context, std::string_view password)
-      : socket_{context, ZMQ_PAIR},
+  StupidHandshaker(std::shared_ptr<zmq::context_t> context,
+                   std::string_view password)
+      : ctx_{std::move(context)},
+        socket_{*ctx_, ZMQ_PAIR},
         password_{password} {}
 
   StupidHandshaker(const StupidHandshaker&) = delete;
@@ -212,6 +214,7 @@ class StupidHandshaker : public Handshaker<StupidHandshaker> {
     std::cout << "Handshaker closing...\n";
   }
 
+  std::shared_ptr<zmq::context_t> ctx_;
   zmq::socket_t socket_;
   const std::string password_;
 

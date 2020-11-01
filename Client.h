@@ -494,7 +494,7 @@ class Client {
                     std::get<crypto::Bytes>(maybe_cleartext);
                 message.rebuild(cleartext.data(), cleartext.size());
               })
-              .or_else([this, &message](std::error_code&& /*ec*/){
+              .or_else([&message](std::error_code&& /*ec*/){
                 std::cerr << "Error unpacking message\n";
                 message.rebuild("", 0);
               });

@@ -297,7 +297,8 @@ class Client {
   /// \return \e std::errc::protocol_error if internal error occured.
   /// \return Otherwise data returned from the server.
   [[nodiscard]]
-  tl::expected<Bytes, std::error_code> Request(const Bytes& data) noexcept {
+  tl::expected<Bytes, std::error_code>
+  Request(const unsigned char* data, size_t size) noexcept {
     const auto make_unexpected = [](std::errc errc) {
       return tl::unexpected{std::make_error_code(errc)};
     };
@@ -307,7 +308,7 @@ class Client {
         return make_unexpected(std::errc::operation_not_permitted);
       }
 
-      zmq::message_t message{data.data(), data.size()};
+      zmq::message_t message{data, size};
 
       std::cout << "Request() - Passing the message\n";
       user_data_socket_req_.send(message, zmq::send_flags::none);
@@ -328,6 +329,13 @@ class Client {
       std::cerr << "Request() - unknown error\n";
       return make_unexpected(std::errc::protocol_error);
     }
+  }
+
+  template <typename Container>
+  [[nodiscard]]
+  inline tl::expected<Bytes, std::error_code>
+  Request(const Container& data) noexcept {
+    return Request(std::data(data), std::size(data));
   }
 
  private:

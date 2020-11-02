@@ -21,6 +21,9 @@
 
 #include <string>
 
+template<class... Ts> struct overload : Ts... { using Ts::operator()...; };
+template<class... Ts> overload(Ts...) -> overload<Ts...>;
+
 // size in bytes
 std::string to_hex(const void* data, size_t size) {
   const unsigned char* data_ = static_cast<const unsigned char*>(data);

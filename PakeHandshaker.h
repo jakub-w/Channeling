@@ -29,9 +29,6 @@
 #include "ProtocolCommon.h"
 #include "Util.h"
 
-template<class... Ts> struct overload : Ts... { using Ts::operator()...; };
-template<class... Ts> overload(Ts...) -> overload<Ts...>;
-
 // Uses J-PAKE algorithm
 class PakeHandshaker : public Handshaker<PakeHandshaker> {
   // FIXME: Use a class based on std::array, but that zeroes its memory on

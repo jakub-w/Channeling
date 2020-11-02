@@ -38,7 +38,16 @@
 #include "ProtocolCommon.h"
 #include "Util.h"
 
-template <class Handshaker>
+/// \e MessageHandlerResult must be an rvalue, also it must own the data
+/// stored inside of it. The data will be used by an encryption algorithm so
+/// it is crucial for it to live long enough to do that. If this restriction
+/// is not followed it could lead to hard to track memory errors.
+/// \e MessageHandlerResult must also have size() and data() member functions.
+template <class Handshaker,
+          typename MessageHandlerResult = Bytes,
+          std::enable_if_t<not (std::is_pointer_v<MessageHandlerResult> or
+                                std::is_reference_v<MessageHandlerResult>),
+                           bool> = 0>
 class Server {
   using HandshakerMessageType = typename Handshaker::HandshakerMessageType;
 
@@ -54,7 +63,7 @@ class Server {
  public:
   Server(std::shared_ptr<zmq::context_t> context,
          std::shared_ptr<Handshaker> handshaker,
-         std::function<Bytes(Bytes&&)>&& message_handler)
+         std::function<MessageHandlerResult(Bytes&&)>&& message_handler)
       : ctx_{std::move(context)},
         handshaker_{std::move(handshaker)},
         socket_{*ctx_, ZMQ_ROUTER},
@@ -113,10 +122,6 @@ class Server {
     socket.send(zmq::buffer(client_id), zmq::send_flags::sndmore);
     socket.send(zmq::buffer(""), zmq::send_flags::sndmore);
     socket.send(make_msg(type), zmq::send_flags::dontwait);
-  }
-
-  inline Bytes handle_user_data(Bytes&& data) {
-    return user_data_handler_(std::move(data));
   }
 
   void handle_incoming() {
@@ -346,19 +351,25 @@ class Server {
           break;
         }
 
-        Bytes cleartext_response;
-        try {
-          cleartext_response = handle_user_data(
-              std::move(std::get<crypto::Bytes>(maybe_cleartext)));
-        } catch (const std::exception& e) {
-          std::cerr << "Throw in the user's message handler: "
-                    << e.what() << '\n';
-          message[2] = make_msg(MessageType::PROTOCOL_ERROR);
-          message.send(socket_);
-          break;
-        } catch (...) {
-          std::cerr << "Throw in the user's message handler. Type of the "
-              "exception unknown, so no more data provided.\n";
+        tl::expected<MessageHandlerResult, bool> cleartext_response =
+            [this, &maybe_cleartext]()
+            -> tl::expected<MessageHandlerResult, bool> {
+              try {
+                return user_data_handler_(
+                    std::move(std::get<crypto::Bytes>(maybe_cleartext)));
+              } catch (const std::exception& e) {
+                std::cerr << "Throw in the user's message handler: "
+                          << e.what() << '\n';
+                return tl::unexpected(false);
+              } catch (...) {
+                std::cerr <<
+                    "Throw in the user's message handler. Type of the "
+                    "exception unknown, so no more data provided.\n";
+                return tl::unexpected(false);
+              }
+            }();
+
+        if (not cleartext_response) {
           message[2] = make_msg(MessageType::PROTOCOL_ERROR);
           message.send(socket_);
           break;
@@ -366,7 +377,9 @@ class Server {
 
         auto& enc_ctx =
             std::get<crypto::SodiumEncryptionContext>(ci.encryption_ctx);
-        const auto enc_result = enc_ctx.Encrypt(cleartext_response);
+        const auto enc_result =
+            enc_ctx.Encrypt(std::data(cleartext_response.value()),
+                            std::size(cleartext_response.value()));
         if (std::holds_alternative<std::error_code>(enc_result)) {
           // auto ec = std::get<std::error_code>(enc_result);
           std::cerr << "Error encrypting data\n";
@@ -526,7 +539,7 @@ class Server {
 
   std::unordered_map<std::string, client_info> clients;
 
-  std::function<Bytes(Bytes&&)> user_data_handler_;
+  std::function<MessageHandlerResult(Bytes&&)> user_data_handler_;
 };
 
 #endif /* SERVER_H */

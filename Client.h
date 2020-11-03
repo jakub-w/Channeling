@@ -22,7 +22,9 @@
 #include <chrono>
 #include <exception>
 #include <iostream>
+#include <memory>
 #include <optional>
+#include <string_view>
 #include <system_error>
 #include <thread>
 #include <variant>
@@ -148,7 +150,7 @@ class Client {
             return false;
           }
 
-          socket_.send(make_msg(MessageType::AUTH_FINISHED,enc_header),
+          socket_.send(make_msg(MessageType::AUTH_FINISHED, enc_header),
                        zmq::send_flags::none);
           break;
         }
@@ -292,7 +294,6 @@ class Client {
   ///
   /// Thread safe.
   ///
-  /// \return \e std::errc::no_message_available if there's no data.
   /// \return \e std::errc::operation_not_permitted if client is not running.
   /// \return \e std::errc::protocol_error if internal error occured.
   /// \return Otherwise data returned from the server.
@@ -318,10 +319,35 @@ class Client {
       std::cout << "Request() - Response received: " << message << '\n';
 
       if (message.size() == 0) {
-        return make_unexpected(std::errc::no_message_available);
+        // should at least store the type
+        return make_unexpected(std::errc::protocol_error);
       }
-      return Bytes(message.data<unsigned char>(),
-                   message.data<unsigned char>() + message.size());
+
+      size_t offset = 0;
+      auto maybe_type = Unpack<ClientMessageType>(
+          message.data<char>(), message.size(), offset);
+
+      if (not maybe_type) {
+        std::cerr << "Request() - Couldn't retrieve the type from the "
+            "response: " << maybe_type.error().message() << '\n';
+        return make_unexpected(std::errc::protocol_error);
+      }
+
+      switch (maybe_type.value()) {
+        case ClientMessageType::PROTOCOL_ERROR:
+          return make_unexpected(std::errc::protocol_error);
+        case ClientMessageType::DATA: {
+          return Unpack<Bytes>(message.data<char>(),
+                               message.size(), offset)
+              .map_error([](std::error_code&& ec) {
+                std::cerr << "Request() - Couldn't retrieve the data from "
+                    "the response: " << ec.message() << '\n';;
+                return std::make_error_code(std::errc::protocol_error);
+              });
+        }
+      }
+
+      return make_unexpected(std::errc::protocol_error);
     } catch (const std::exception& e) {
       std::cerr << "Request() - error: " << e.what() << '\n';
       return make_unexpected(std::errc::protocol_error);
@@ -461,8 +487,9 @@ class Client {
           if (ec) {
             // TODO: Handle ec
             std::cerr << "Error while encrypting data\n";
-            user_data_socket_resp_.send(zmq::message_t(),
-                                        zmq::send_flags::none);
+            user_data_socket_resp_.send(
+                make_msg(ClientMessageType::PROTOCOL_ERROR),
+                zmq::send_flags::none);
             continue;
           }
 
@@ -477,11 +504,11 @@ class Client {
                       .value_or(MessageType::UNKNOWN);
 
           if (MessageType::ENCRYPTED_DATA != type) {
-            // TODO: Handle more types
             std::cerr << "Wrong message received - type: "
                       << MessageTypeName(type) << '\n';
-            user_data_socket_resp_.send(zmq::message_t(),
-                                        zmq::send_flags::none);
+            user_data_socket_resp_.send(
+                make_msg(ClientMessageType::PROTOCOL_ERROR),
+                zmq::send_flags::none);
             continue;
           }
 
@@ -494,17 +521,17 @@ class Client {
                 if (std::holds_alternative<std::error_code>(
                         maybe_cleartext)) {
                   std::cerr << "Error decrypting message\n";
-                  message.rebuild("", 0);
+                  message = make_msg(ClientMessageType::PROTOCOL_ERROR);
                   return;
                 }
 
                 const auto& cleartext =
                     std::get<crypto::Bytes>(maybe_cleartext);
-                message.rebuild(cleartext.data(), cleartext.size());
+                message = make_msg(ClientMessageType::DATA, cleartext);
               })
               .or_else([&message](std::error_code&& /*ec*/){
                 std::cerr << "Error unpacking message\n";
-                message.rebuild("", 0);
+                message = make_msg(ClientMessageType::PROTOCOL_ERROR);
               });
 
           user_data_socket_resp_.send(message, zmq::send_flags::none);

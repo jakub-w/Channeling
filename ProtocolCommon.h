@@ -46,6 +46,13 @@ enum class MessageType : int {
 };
 MSGPACK_ADD_ENUM(MessageType);
 
+enum class ClientMessageType {
+  PROTOCOL_ERROR = -1,
+  DATA = 0
+};
+MSGPACK_ADD_ENUM(ClientMessageType);
+
+
 constexpr auto MessageTypeName(MessageType type) {
   switch (type) {
     case MessageType::PROTOCOL_ERROR:

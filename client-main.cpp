@@ -31,7 +31,7 @@ int main() {
   Client client{ctx, std::make_shared<PakeHandshaker>(ctx, "password")};
 
   const auto start = std::chrono::high_resolution_clock::now();
-  if (not client.Connect("ipc://zeromq-server")) {
+  if (not client.Connect("ipc:///tmp/zeromq-server")) {
     std::cerr << "Connection failed\n";
     return 1;
   }

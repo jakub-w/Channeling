@@ -18,23 +18,25 @@
 
 #include <csignal>
 #include <iostream>
+#include <memory>
 
 #include <zmq.hpp>
 
 // #include "Handshaker.h"
 #include "PakeHandshaker.h"
+#include "ProtocolCommon.h"
 #include "Server.h"
 
 auto ctx = std::make_shared<zmq::context_t>();
 // auto handshaker = std::make_shared<StupidHandshaker>(ctx, "password");
 auto handshaker = std::make_shared<PakeHandshaker>(ctx, "password");
-const auto message_handler = [](const Bytes& data) {
+const auto message_handler = [](const Bytes& data) -> Bytes {
   std::cout.write(reinterpret_cast<const char*>(data.data()),
                   data.size()) << '\n';
 
   return Bytes{'r', 'e', 's', 'p', 'o', 'n', 's', 'e'};
 };
-Server server(ctx, handshaker, message_handler);
+Server<PakeHandshaker> server(ctx, handshaker, message_handler);
 
 void close_server(int signum) {
   if (signum == SIGTERM or
@@ -47,7 +49,7 @@ int main() {
   std::signal(SIGTERM, close_server);
   std::signal(SIGINT, close_server);
 
-  server.Bind("ipc://zeromq-server");
+  server.Bind("ipc:///tmp/zeromq-server");
 
   std::cout << "Starting the server...\n";
   server.Run();

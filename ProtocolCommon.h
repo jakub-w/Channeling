@@ -115,24 +115,10 @@ inline std::string pack_message_type(MessageType type) {
   return buffer.str();
 }
 
-namespace{
-template <typename Arg>
-void make_msg_internal(std::stringstream& buffer, const Arg& arg) {
-  msgpack::pack(buffer, arg);
-}
-
-template <typename Arg, typename... Args>
-void make_msg_internal(std::stringstream& buffer,
-                       const Arg& arg, const Args&... rest) {
-  msgpack::pack(buffer, arg);
-  make_msg_internal(buffer, rest...);
-}
-}
-
 template <typename... Args>
 zmq::message_t make_msg(const Args&... args) {
   std::stringstream buffer;
-  make_msg_internal(buffer, args...);
+  (msgpack::pack(buffer, args), ...);
   const auto buffer_str = buffer.str();
 
   return zmq::message_t{buffer_str.data(), buffer_str.size()};

@@ -23,6 +23,7 @@
 #include <exception>
 #include <iostream>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <string_view>
 #include <system_error>
@@ -53,8 +54,7 @@ class Client {
         socket_{*ctx_, ZMQ_REQ},
         handshaker_socket_{*ctx_, ZMQ_PAIR},
         handshaker_{std::move(handshaker)},
-        user_data_socket_resp_{*ctx_, ZMQ_PAIR},
-        user_data_socket_req_{*ctx_, ZMQ_PAIR}
+        user_data_socket_resp_{*ctx_, ZMQ_ROUTER}
   {}
 
   ~Client() noexcept {
@@ -267,7 +267,6 @@ class Client {
 
     try {
       user_data_socket_resp_.bind(user_data_socket_address);
-      user_data_socket_req_.connect(user_data_socket_address);
       running_ = true;
 
       user_data_thread_ =
@@ -309,13 +308,26 @@ class Client {
         return make_unexpected(std::errc::operation_not_permitted);
       }
 
+      // To properly close sockets when destroying Client they are added to
+      // a vector as unique_ptrs.
+      static thread_local zmq::socket_t* req_socket =
+          [&, ctx = ctx_.get()]{
+            std::lock_guard lck{sockets_mtx_};
+
+            auto& sock = thread_local_sockets_.emplace_back(
+                std::make_unique<zmq::socket_t>(*ctx, ZMQ_REQ));
+
+            sock->connect(user_data_socket_address);
+            return sock.get();
+          }();
+
       zmq::message_t message{data, size};
 
       std::cout << "Request() - Passing the message\n";
-      user_data_socket_req_.send(message, zmq::send_flags::none);
+      req_socket->send(message, zmq::send_flags::none);
       std::cout << "Request() - Message sent, waiting for a response\n";
 
-      while (not user_data_socket_req_.recv(message).has_value()) {}
+      while (not req_socket->recv(message).has_value()) {}
       std::cout << "Request() - Response received: " << message << '\n';
 
       if (message.size() == 0) {
@@ -456,7 +468,7 @@ class Client {
   }
 
   void user_data_loop() noexcept {
-    zmq::message_t message;
+    zmq::multipart_t message;
 
     std::array<zmq::pollitem_t, 1> items = {{
         zmq::pollitem_t{user_data_socket_resp_, 0, ZMQ_POLLIN, 0}
@@ -473,46 +485,49 @@ class Client {
 
       if (items[0].revents & ZMQ_POLLIN) {
         try {
-          if (not user_data_socket_resp_.recv(message)) continue;
+
+          if (not message.recv(user_data_socket_resp_)) continue;
           std::cout << "Run() - message received: " << message << '\n';;
+
+          assert(message.size() == 3);
 
           auto& enc_ctx =
               std::get<crypto::SodiumEncryptionContext>(encryption_ctx);
-          crypto::Bytes ciphertext(message.size() + crypto::NA_SS_ABYTES);
-          auto ec = enc_ctx.Encrypt(message.data<unsigned char>(),
-                                    message.size(),
+          crypto::Bytes ciphertext(message[2].size() + crypto::NA_SS_ABYTES);
+          auto ec = enc_ctx.Encrypt(message[2].data<unsigned char>(),
+                                    message[2].size(),
                                     ciphertext.data(),
                                     ciphertext.size());
 
           if (ec) {
             // TODO: Handle ec
             std::cerr << "Error while encrypting data\n";
-            user_data_socket_resp_.send(
-                make_msg(ClientMessageType::PROTOCOL_ERROR),
-                zmq::send_flags::none);
+            message[2] = make_msg(ClientMessageType::PROTOCOL_ERROR);
+            message.send(user_data_socket_resp_);
             continue;
           }
 
           std::cout << "Sending to server...\n";
           socket_.send(make_msg(MessageType::ENCRYPTED_DATA, ciphertext),
                        zmq::send_flags::none);
-          while (not socket_.recv(message));
+
+          zmq::message_t response;
+          while (not socket_.recv(response));
 
           std::size_t offset = 0;
-          auto type = Unpack<MessageType>(message.data<char>(),
-                                          message.size(), offset)
+          auto type = Unpack<MessageType>(response.data<char>(),
+                                          response.size(), offset)
                       .value_or(MessageType::UNKNOWN);
 
           if (MessageType::ENCRYPTED_DATA != type) {
             std::cerr << "Wrong message received - type: "
                       << MessageTypeName(type) << '\n';
-            user_data_socket_resp_.send(
-                make_msg(ClientMessageType::PROTOCOL_ERROR),
-                zmq::send_flags::none);
+            message[2] = make_msg(ClientMessageType::PROTOCOL_ERROR);
+            message.send(user_data_socket_resp_);
             continue;
           }
 
-          Unpack<Bytes>(message.data<char>(), message.size(), offset)
+          Unpack<Bytes>(response.data<char>(), response.size(), offset)
               .map([this, &message](crypto::Bytes&& ciphertext){
                 auto& dec_ctx =
                     std::get<crypto::SodiumDecryptionContext>(decryption_ctx);
@@ -521,20 +536,20 @@ class Client {
                 if (std::holds_alternative<std::error_code>(
                         maybe_cleartext)) {
                   std::cerr << "Error decrypting message\n";
-                  message = make_msg(ClientMessageType::PROTOCOL_ERROR);
+                  message[2] = make_msg(ClientMessageType::PROTOCOL_ERROR);
                   return;
                 }
 
                 const auto& cleartext =
                     std::get<crypto::Bytes>(maybe_cleartext);
-                message = make_msg(ClientMessageType::DATA, cleartext);
+                message[2] = make_msg(ClientMessageType::DATA, cleartext);
               })
               .or_else([&message](std::error_code&& /*ec*/){
                 std::cerr << "Error unpacking message\n";
-                message = make_msg(ClientMessageType::PROTOCOL_ERROR);
+                message[2] = make_msg(ClientMessageType::PROTOCOL_ERROR);
               });
 
-          user_data_socket_resp_.send(message, zmq::send_flags::none);
+          message.send(user_data_socket_resp_);
         } catch (const std::exception& e) {
           std::cerr << "Error when handling user data message: " << e.what()
                     << '\n';
@@ -563,7 +578,9 @@ class Client {
   decryption_ctx = CryptoKey{};
 
   zmq::socket_t user_data_socket_resp_;
-  zmq::socket_t user_data_socket_req_;
+  std::vector<std::unique_ptr<zmq::socket_t>> thread_local_sockets_;
+  std::mutex sockets_mtx_;
+
   std::atomic_bool running_ = false;
   std::thread user_data_thread_;
 };

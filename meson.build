@@ -51,22 +51,26 @@ required_deps = [zmq_dep, sodium_dep, msgpack_dep]
 
 
 # Subprojects
-cipher_stream_inc = include_directories('SodiumCipherStream')
+cipher_stream_proj = subproject('SodiumCipherStream',
+				default_options: 'static=true')
+cipher_stream_lib = cipher_stream_proj.get_variable('libscs_static')
+
+subproject_incs = include_directories('subprojects')
 
 
 # Binaries
 executable('server',
 	   sources: ['server-main.cpp',
-		     'EncryptionCommon.cpp',
-		     'SodiumCipherStream/SodiumCipherStream.cpp'],
-	   include_directories: [cipher_stream_inc],
+		     'EncryptionCommon.cpp'],
+	   include_directories: [subproject_incs],
+	   link_with: [cipher_stream_lib],
 	   dependencies: required_deps)
 
 executable('client',
 	   sources: ['client-main.cpp',
-		     'EncryptionCommon.cpp',
-		     'SodiumCipherStream/SodiumCipherStream.cpp'],
-	   include_directories: [cipher_stream_inc],
+		     'EncryptionCommon.cpp'],
+	   include_directories: [subproject_incs],
+	   link_with: [cipher_stream_lib],
 	   dependencies: required_deps)
 
 # executable('test_all',

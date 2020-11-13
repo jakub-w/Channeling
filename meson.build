@@ -45,11 +45,9 @@ zmq_dep = dependency('libzmq')
 sodium_dep = dependency('libsodium')
 msgpack_dep = dependency('msgpack')
 
+meson.get_compiler('cpp').check_header('tl/expected.hpp', required: true)
+
 required_deps = [zmq_dep, sodium_dep, msgpack_dep]
-
-
-# Includes
-includes = include_directories('expected/include')
 
 
 # Subprojects
@@ -61,14 +59,14 @@ executable('server',
 	   sources: ['server-main.cpp',
 		     'EncryptionCommon.cpp',
 		     'SodiumCipherStream/SodiumCipherStream.cpp'],
-	   include_directories: [includes, cipher_stream_inc],
+	   include_directories: [cipher_stream_inc],
 	   dependencies: required_deps)
 
 executable('client',
 	   sources: ['client-main.cpp',
 		     'EncryptionCommon.cpp',
 		     'SodiumCipherStream/SodiumCipherStream.cpp'],
-	   include_directories: [includes, cipher_stream_inc],
+	   include_directories: [cipher_stream_inc],
 	   dependencies: required_deps)
 
 # executable('test_all',

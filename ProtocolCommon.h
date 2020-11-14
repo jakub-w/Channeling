@@ -22,15 +22,17 @@
 #include <array>
 #include <iostream>
 
-#include "msgpack.hpp"
-#include "tl/expected.hpp"
-#include "zmq.hpp"
+#include <msgpack.hpp>
+#include <tl/expected.hpp>
+#include <zmq.hpp>
+#include <zmq_addon.hpp>
 
 using CryptoKey = std::array<unsigned char, 32>;
 using EncKeys = msgpack::type::tuple<CryptoKey, CryptoKey>;
 // using EncKeys = std::tuple<CryptoKey, CryptoKey>;
 using PartialMessage = std::string;
 using Bytes = std::vector<unsigned char>;
+using req_id_t = std::uint32_t;
 
 enum class MessageType : int {
   PROTOCOL_ERROR = -3,
@@ -122,6 +124,22 @@ zmq::message_t make_msg(const Args&... args) {
   const auto buffer_str = buffer.str();
 
   return zmq::message_t{buffer_str.data(), buffer_str.size()};
+}
+
+auto make_unexpected(std::errc errc) {
+  return tl::unexpected{std::make_error_code(errc)};
+}
+
+std::error_code recv_from_dealer(
+      zmq::socket_ref socket, zmq::message_t& message,
+      zmq::recv_flags flags = zmq::recv_flags::none) {
+  std::vector<zmq::message_t> msgs;
+  while (not zmq::recv_multipart(socket, std::back_inserter(msgs), flags));
+  if (2 != msgs.size()) {
+    return std::make_error_code(std::errc::bad_message);
+  }
+  message = std::move(msgs[1]);
+  return {};
 }
 
 #endif /* PROTOCOLCOMMON_H */

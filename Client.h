@@ -21,13 +21,19 @@
 
 #include <chrono>
 #include <exception>
+#include <future>
 #include <iostream>
+#include <map>
 #include <memory>
 #include <optional>
 #include <string_view>
 #include <system_error>
 #include <thread>
 #include <variant>
+
+#include <msgpack.hpp>
+
+#include <tl/expected.hpp>
 
 #include <zmq.h>
 #include <zmq.hpp>
@@ -36,34 +42,27 @@
 #include "SodiumCipherStream/SodiumCipherStream.h"
 
 #include "ProtocolCommon.h"
+#include "RequestProcessor.h"
 #include "Util.h"
-
-#include "msgpack/v3/unpack_decl.hpp"
-#include "tl/expected.hpp"
 
 template <typename Handshaker>
 class Client {
   using HandshakerMessageType = typename Handshaker::HandshakerMessageType;
 
  public:
+  using MaybeResponse = tl::expected<Bytes, std::error_code>;
+
   Client(std::shared_ptr<zmq::context_t> context,
          std::shared_ptr<Handshaker> handshaker)
       noexcept
       : ctx_{std::move(context)},
-        socket_{*ctx_, ZMQ_REQ},
+        socket_{*ctx_, ZMQ_DEALER},
         handshaker_socket_{*ctx_, ZMQ_PAIR},
         handshaker_{std::move(handshaker)},
-        user_data_socket_resp_{*ctx_, ZMQ_PAIR},
-        user_data_socket_req_{*ctx_, ZMQ_PAIR}
-  {}
+        req_processor_{zmq::socket_ref{}, nullptr, nullptr} {}
 
   ~Client() noexcept {
     Stop();
-    if (user_data_thread_.joinable()) {
-      try {
-        user_data_thread_.join();
-      } catch (...) {}
-    }
   }
 
   [[nodiscard]]
@@ -72,14 +71,17 @@ class Client {
     handshaker_->Start();
     handshaker_socket_.connect(handshaker_->GetAddress());
 
-    socket_.send(make_msg(MessageType::ID), zmq::send_flags::none);
+    send_to_server(make_msg(MessageType::ID));
 
-    zmq::message_t id_response;
-    while (not socket_.recv(id_response).has_value());
+    zmq::message_t message;
+    if (recv_from_dealer(socket_, message)) { // error code returned
+      std::cerr << "Received bad ID response\n";
+      return false;
+    }
 
     std::size_t offset = 0;
-    const std::string id = Unpack<std::string>(id_response.data<char>(),
-                                               id_response.size(),
+    const std::string id = Unpack<std::string>(message.data<char>(),
+                                               message.size(),
                                                offset)
                            .value_or("");
 
@@ -88,14 +90,13 @@ class Client {
       return false;
     }
 
-    socket_.send(handshaker_->GetAuthRequest(id), zmq::send_flags::none);
+    send_to_server(handshaker_->GetAuthRequest(id));
 
     for(;;) {
-      // FIXME: ZMQ_REQ
-      zmq::message_t message;
-      // NOTE: If it doesn't have a value, it means the error EAGAIN was
-      //       received.
-      if (not socket_.recv(message).has_value()) continue;
+      if (recv_from_dealer(socket_, message)) { // returned error code
+        std::cerr << "Bad message received\n";
+        return false;
+      }
 
       size_t offset = 0;
       const auto type = Unpack<MessageType>(message.data<char>(),
@@ -150,8 +151,7 @@ class Client {
             return false;
           }
 
-          socket_.send(make_msg(MessageType::AUTH_FINISHED, enc_header),
-                       zmq::send_flags::none);
+          send_to_server(make_msg(MessageType::AUTH_FINISHED, enc_header));
           break;
         }
         case MessageType::AUTH_FINISHED: {
@@ -235,15 +235,13 @@ class Client {
             return false;
           }
 
-          socket_.send(maybe_message.value(), zmq::send_flags::none);
+          send_to_server(std::move(maybe_message.value()));
           break;
         }
         default:
           std::cerr << "Unhandled message type: "
                     << MessageTypeName(type) << "\n\n";
-          const auto bad_msg = MessageType::BAD_MESSAGE;
-          message.rebuild(&bad_msg, sizeof(bad_msg));
-          socket_.send(message, zmq::send_flags::none);
+          send_to_server(make_msg(MessageType::BAD_MESSAGE));
           return false;
       }
     }
@@ -264,15 +262,16 @@ class Client {
           "The client isn't properly connected to the server.\n";
       return std::make_error_code(std::errc::operation_not_permitted);
     }
-
     try {
-      user_data_socket_resp_.bind(user_data_socket_address);
-      user_data_socket_req_.connect(user_data_socket_address);
-      running_ = true;
+      // TODO: This should be initialized in the last stage of Connect().
+      //       RequestProcessor should probably take ownership over the
+      //       contexts.
+      req_processor_ = RequestProcessor{
+        socket_,
+        &std::get<crypto::SodiumEncryptionContext>(encryption_ctx),
+        &std::get<crypto::SodiumDecryptionContext>(decryption_ctx)};
 
-      user_data_thread_ =
-          std::thread(&Client<Handshaker>::user_data_loop, this);
-
+      req_processor_.Start();
       return {};
     } catch (const std::exception& e) {
       std::cerr << "Start() - " << e.what() << '\n';
@@ -284,7 +283,7 @@ class Client {
   }
 
   void Stop() noexcept {
-    running_ = false;
+    req_processor_.Stop();
   }
 
   /// \brief Send a request to the server.
@@ -298,68 +297,14 @@ class Client {
   /// \return \e std::errc::protocol_error if internal error occured.
   /// \return Otherwise data returned from the server.
   [[nodiscard]]
-  tl::expected<Bytes, std::error_code>
+  inline MaybeResponse
   Request(const unsigned char* data, size_t size) noexcept {
-    const auto make_unexpected = [](std::errc errc) {
-      return tl::unexpected{std::make_error_code(errc)};
-    };
-
-    try {
-      if (not running_) {
-        return make_unexpected(std::errc::operation_not_permitted);
-      }
-
-      zmq::message_t message{data, size};
-
-      std::cout << "Request() - Passing the message\n";
-      user_data_socket_req_.send(message, zmq::send_flags::none);
-      std::cout << "Request() - Message sent, waiting for a response\n";
-
-      while (not user_data_socket_req_.recv(message).has_value()) {}
-      std::cout << "Request() - Response received: " << message << '\n';
-
-      if (message.size() == 0) {
-        // should at least store the type
-        return make_unexpected(std::errc::protocol_error);
-      }
-
-      size_t offset = 0;
-      auto maybe_type = Unpack<ClientMessageType>(
-          message.data<char>(), message.size(), offset);
-
-      if (not maybe_type) {
-        std::cerr << "Request() - Couldn't retrieve the type from the "
-            "response: " << maybe_type.error().message() << '\n';
-        return make_unexpected(std::errc::protocol_error);
-      }
-
-      switch (maybe_type.value()) {
-        case ClientMessageType::PROTOCOL_ERROR:
-          return make_unexpected(std::errc::protocol_error);
-        case ClientMessageType::DATA: {
-          return Unpack<Bytes>(message.data<char>(),
-                               message.size(), offset)
-              .map_error([](std::error_code&& ec) {
-                std::cerr << "Request() - Couldn't retrieve the data from "
-                    "the response: " << ec.message() << '\n';;
-                return std::make_error_code(std::errc::protocol_error);
-              });
-        }
-      }
-
-      return make_unexpected(std::errc::protocol_error);
-    } catch (const std::exception& e) {
-      std::cerr << "Request() - error: " << e.what() << '\n';
-      return make_unexpected(std::errc::protocol_error);
-    } catch (...) {
-      std::cerr << "Request() - unknown error\n";
-      return make_unexpected(std::errc::protocol_error);
-    }
+    return req_processor_.MakeRequest(data, size).get();
   }
 
   template <typename Container>
   [[nodiscard]]
-  inline tl::expected<Bytes, std::error_code>
+  inline MaybeResponse
   Request(const Container& data) noexcept {
     return Request(std::data(data), std::size(data));
   }
@@ -455,98 +400,10 @@ class Client {
     return zmq::message_t{buffer_str.data(), buffer_str.size()};
   }
 
-  void user_data_loop() noexcept {
-    zmq::message_t message;
-
-    std::array<zmq::pollitem_t, 1> items = {{
-        zmq::pollitem_t{user_data_socket_resp_, 0, ZMQ_POLLIN, 0}
-      }};
-
-    while (running_) {
-      try {
-        zmq::poll(items.data(), items.size(), std::chrono::milliseconds(500));
-      } catch (const zmq::error_t& e) {
-        std::cerr << "Error on poll: " << e.what() << '\n';
-        running_ = false;
-        return;
-      }
-
-      if (items[0].revents & ZMQ_POLLIN) {
-        try {
-          if (not user_data_socket_resp_.recv(message)) continue;
-          std::cout << "Run() - message received: " << message << '\n';;
-
-          auto& enc_ctx =
-              std::get<crypto::SodiumEncryptionContext>(encryption_ctx);
-          crypto::Bytes ciphertext(message.size() + crypto::NA_SS_ABYTES);
-          auto ec = enc_ctx.Encrypt(message.data<unsigned char>(),
-                                    message.size(),
-                                    ciphertext.data(),
-                                    ciphertext.size());
-
-          if (ec) {
-            // TODO: Handle ec
-            std::cerr << "Error while encrypting data\n";
-            user_data_socket_resp_.send(
-                make_msg(ClientMessageType::PROTOCOL_ERROR),
-                zmq::send_flags::none);
-            continue;
-          }
-
-          std::cout << "Sending to server...\n";
-          socket_.send(make_msg(MessageType::ENCRYPTED_DATA, ciphertext),
-                       zmq::send_flags::none);
-          while (not socket_.recv(message));
-
-          std::size_t offset = 0;
-          auto type = Unpack<MessageType>(message.data<char>(),
-                                          message.size(), offset)
-                      .value_or(MessageType::UNKNOWN);
-
-          if (MessageType::ENCRYPTED_DATA != type) {
-            std::cerr << "Wrong message received - type: "
-                      << MessageTypeName(type) << '\n';
-            user_data_socket_resp_.send(
-                make_msg(ClientMessageType::PROTOCOL_ERROR),
-                zmq::send_flags::none);
-            continue;
-          }
-
-          Unpack<Bytes>(message.data<char>(), message.size(), offset)
-              .map([this, &message](crypto::Bytes&& ciphertext){
-                auto& dec_ctx =
-                    std::get<crypto::SodiumDecryptionContext>(decryption_ctx);
-                auto maybe_cleartext = dec_ctx.Decrypt(ciphertext);
-
-                if (std::holds_alternative<std::error_code>(
-                        maybe_cleartext)) {
-                  std::cerr << "Error decrypting message\n";
-                  message = make_msg(ClientMessageType::PROTOCOL_ERROR);
-                  return;
-                }
-
-                const auto& cleartext =
-                    std::get<crypto::Bytes>(maybe_cleartext);
-                message = make_msg(ClientMessageType::DATA, cleartext);
-              })
-              .or_else([&message](std::error_code&& /*ec*/){
-                std::cerr << "Error unpacking message\n";
-                message = make_msg(ClientMessageType::PROTOCOL_ERROR);
-              });
-
-          user_data_socket_resp_.send(message, zmq::send_flags::none);
-        } catch (const std::exception& e) {
-          std::cerr << "Error when handling user data message: " << e.what()
-                    << '\n';
-          running_ = false;
-          return;
-        } catch (...) {
-          std::cerr << "Error when handling user data message\n";
-          running_ = false;
-          return;
-        }
-      }
-    }
+  inline auto send_to_server(zmq::message_t&& message) {
+    socket_.send(zmq::const_buffer(nullptr, 0), zmq::send_flags::sndmore);
+    // socket_.send(zmq::str_buffer(""), zmq::send_flags::sndmore);
+    return socket_.send(std::move(message), zmq::send_flags::dontwait);
   }
 
   static constexpr char user_data_socket_address[] =  "inproc://user-data";
@@ -562,10 +419,7 @@ class Client {
   std::variant<CryptoKey, crypto::SodiumDecryptionContext>
   decryption_ctx = CryptoKey{};
 
-  zmq::socket_t user_data_socket_resp_;
-  zmq::socket_t user_data_socket_req_;
-  std::atomic_bool running_ = false;
-  std::thread user_data_thread_;
+  RequestProcessor req_processor_;
 };
 
 #endif /* CLIENT_H */

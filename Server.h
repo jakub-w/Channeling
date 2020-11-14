@@ -307,11 +307,22 @@ class Server {
 
         auto& ci = clients[client_id];
 
+        auto request_id = Unpack<req_id_t>(message[2].data<char>(),
+                                           message[2].size(), offset)
+                          .value_or(0);
+        if (0 == request_id) {
+          std::cerr << "Error: Client didn't include request id with the "
+              "request\n";
+          message[2] = make_msg(MessageType::PROTOCOL_ERROR);
+          message.send(socket_);
+          break;
+        }
+
         if (not (std::holds_alternative<crypto::SodiumEncryptionContext>(
                      ci.encryption_ctx) and
                  std::holds_alternative<crypto::SodiumDecryptionContext>(
                      ci.decryption_ctx))) {
-          message[2] = make_msg(MessageType::PROTOCOL_ERROR);
+          message[2] = make_msg(MessageType::PROTOCOL_ERROR, request_id);
           message.send(socket_);
           break;
         }
@@ -323,7 +334,7 @@ class Server {
         if (not maybe_ciphertext) {
           std::cerr << "Error unpacking ciphertext: "
                     << maybe_ciphertext.error().message() << '\n';
-          message[2] = make_msg(MessageType::PROTOCOL_ERROR);
+          message[2] = make_msg(MessageType::PROTOCOL_ERROR, request_id);
           message.send(socket_);
           break;
         }
@@ -339,13 +350,13 @@ class Server {
               ec == std::errc::operation_not_permitted){
             std::cerr << "PROTOCOL_ERROR on Decrypt()\n";
             std::cerr << ec << '\n';
-            message[2] = make_msg(MessageType::PROTOCOL_ERROR);
+            message[2] = make_msg(MessageType::PROTOCOL_ERROR, request_id);
           } else if (ec == std::errc::invalid_argument){
             std::cerr << "Bad argument for Decrypt()\n";
-            message[2] = make_msg(MessageType::PROTOCOL_ERROR);
+            message[2] = make_msg(MessageType::PROTOCOL_ERROR, request_id);
           } else if (ec == std::errc::connection_aborted){
             std::cerr << "Connection aborted on Decrypt()\n";
-            message[2] = make_msg(MessageType::ACK);
+            message[2] = make_msg(MessageType::ACK, request_id);
           }
           message.send(socket_);
           break;
@@ -370,7 +381,7 @@ class Server {
             }();
 
         if (not cleartext_response) {
-          message[2] = make_msg(MessageType::PROTOCOL_ERROR);
+          message[2] = make_msg(MessageType::PROTOCOL_ERROR, request_id);
           message.send(socket_);
           break;
         }
@@ -384,12 +395,13 @@ class Server {
           // auto ec = std::get<std::error_code>(enc_result);
           std::cerr << "Error encrypting data\n";
 
-          message[2] = make_msg(MessageType::PROTOCOL_ERROR);
+          message[2] = make_msg(MessageType::PROTOCOL_ERROR, request_id);
           message.send(socket_);
           break;
         }
 
         message[2] = make_msg(MessageType::ENCRYPTED_DATA,
+                              request_id,
                               std::get<crypto::Bytes>(enc_result));
         message.send(socket_);
 

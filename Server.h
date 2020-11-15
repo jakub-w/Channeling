@@ -36,6 +36,7 @@
 #include "SodiumCipherStream/SodiumCipherStream.h"
 
 #include "ProtocolCommon.h"
+#include "ServerSFINAE.h"
 #include "Util.h"
 
 /// \e MessageHandlerResult must be an rvalue, also it must own the data
@@ -44,9 +45,13 @@
 /// is not followed it could lead to hard to track memory errors.
 /// \e MessageHandlerResult must also have size() and data() member functions.
 template <class Handshaker,
-          typename MessageHandlerResult = Bytes,
+          typename MessageHandler,
+          typename MessageHandlerResult =
+              std::result_of_t<MessageHandler(Bytes&&)>,
           std::enable_if_t<not (std::is_pointer_v<MessageHandlerResult> or
                                 std::is_reference_v<MessageHandlerResult>),
+                           bool> = 0,
+          std::enable_if_t<has_data_and_size_v<MessageHandlerResult>,
                            bool> = 0>
 class Server {
   using HandshakerMessageType = typename Handshaker::HandshakerMessageType;
@@ -63,7 +68,7 @@ class Server {
  public:
   Server(std::shared_ptr<zmq::context_t> context,
          std::shared_ptr<Handshaker> handshaker,
-         std::function<MessageHandlerResult(Bytes&&)>&& message_handler)
+         MessageHandler message_handler)
       : ctx_{std::move(context)},
         handshaker_{std::move(handshaker)},
         socket_{*ctx_, ZMQ_ROUTER},
@@ -551,7 +556,7 @@ class Server {
 
   std::unordered_map<std::string, client_info> clients;
 
-  std::function<MessageHandlerResult(Bytes&&)> user_data_handler_;
+  MessageHandler user_data_handler_;
 };
 
 #endif /* SERVER_H */

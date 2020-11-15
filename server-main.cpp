@@ -30,13 +30,13 @@
 auto ctx = std::make_shared<zmq::context_t>();
 // auto handshaker = std::make_shared<StupidHandshaker>(ctx, "password");
 auto handshaker = std::make_shared<PakeHandshaker>(ctx, "password");
-const auto message_handler = [](const Bytes& data) -> Bytes {
+const auto message_handler = [](Bytes&& data) {
   std::cout.write(reinterpret_cast<const char*>(data.data()),
                   data.size()) << '\n';
 
   return Bytes{'r', 'e', 's', 'p', 'o', 'n', 's', 'e'};
 };
-Server<PakeHandshaker> server(ctx, handshaker, message_handler);
+Server server(ctx, handshaker, message_handler);
 
 void close_server(int signum) {
   if (signum == SIGTERM or

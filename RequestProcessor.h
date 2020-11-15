@@ -64,7 +64,7 @@ class RequestProcessor {
   std::future<MaybeResponse>
   MakeRequest(const unsigned char* data, size_t size) {
     decltype(promises_)::iterator it;
-    req_id_t num = ++counter_;
+    const req_id_t num = ++counter_;
     {
       std::lock_guard lck(promises_mtx_);
       it = promises_.insert_or_assign(num, std::promise<MaybeResponse>{})
@@ -96,6 +96,7 @@ class RequestProcessor {
 
     std::cout << "Sending to server...\n";
     try {
+      std::lock_guard lck(send_mtx_);
       server_.send(zmq::str_buffer(""), zmq::send_flags::sndmore);
       server_.send(make_msg(MessageType::ENCRYPTED_DATA, num, ciphertext),
                    zmq::send_flags::dontwait);
@@ -218,6 +219,8 @@ class RequestProcessor {
 
   std::map<req_id_t, std::promise<MaybeResponse>> promises_;
   std::mutex promises_mtx_;
+
+  std::mutex send_mtx_;
 
   std::thread thread_;
   std::atomic_bool running_ = false;

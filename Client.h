@@ -296,17 +296,40 @@ class Client {
   /// \return \e std::errc::operation_not_permitted if client is not running.
   /// \return \e std::errc::protocol_error if internal error occured.
   /// \return Otherwise data returned from the server.
+  template <typename TimeoutT = decltype(std::chrono::seconds::max())>
   [[nodiscard]]
   inline MaybeResponse
-  Request(const unsigned char* data, size_t size) noexcept {
-    return req_processor_.MakeRequest(data, size).get();
+  Request(const unsigned char* data, size_t size,
+          const TimeoutT& timeout = std::chrono::seconds::max())
+      noexcept {
+    auto future = req_processor_.MakeRequest(data, size);
+    if (std::future_status::ready != future.wait_for(timeout)) {
+      return tl::unexpected(std::make_error_code(std::errc::timed_out));
+    }
+    return future.get();
+  }
+
+  template <typename Container,
+            typename TimeoutT = decltype(std::chrono::seconds::max())>
+  [[nodiscard]]
+  inline MaybeResponse
+  Request(const Container& data,
+          const TimeoutT& timeout = std::chrono::seconds::max())
+      noexcept {
+    return Request(std::data(data), std::size(data), timeout);
+  }
+
+  [[nodiscard]]
+  inline std::future<MaybeResponse>
+  RequestAsync(const unsigned char* data, size_t size) noexcept {
+    return req_processor_.MakeRequest(data, size);
   }
 
   template <typename Container>
   [[nodiscard]]
-  inline MaybeResponse
-  Request(const Container& data) noexcept {
-    return Request(std::data(data), std::size(data));
+  inline std::future<MaybeResponse>
+  RequestAsync(const Container& data) noexcept {
+    return req_processor_.MakeRequest(std::data(data), std::size(data));
   }
 
  private:

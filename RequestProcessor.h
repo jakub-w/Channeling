@@ -4,6 +4,7 @@
 #include <future>
 #include <mutex>
 
+#include <utility>
 #include <zmq.hpp>
 #include <zmq_addon.hpp>
 
@@ -25,12 +26,30 @@ class RequestProcessor {
   RequestProcessor(RequestProcessor&& other)
       : server_{std::move(other.server_)},
         enc_ctx_{std::move(other.enc_ctx_)},
-        dec_ctx_{std::move(other.dec_ctx_)} {}
+        dec_ctx_{std::move(other.dec_ctx_)}
+  {
+    bool was_running = other.running_;
+    if (was_running) {
+      other.Stop();
+    }
+    promises_ = std::move(other.promises_);
+    if (was_running) {
+      Start();
+    }
+  }
 
   const RequestProcessor& operator=(RequestProcessor&& other) {
     server_ = std::move(other.server_);
     enc_ctx_ = std::move(other.enc_ctx_);
     dec_ctx_ = std::move(other.dec_ctx_);
+    bool was_running = other.running_;
+    if (was_running) {
+      other.Stop();
+    }
+    promises_ = std::move(other.promises_);
+    if (was_running) {
+      Start();
+    }
     return *this;
   }
 
@@ -68,7 +87,7 @@ class RequestProcessor {
 
     crypto::Bytes ciphertext(size + crypto::NA_SS_ABYTES);
     auto ec = enc_ctx_->Encrypt(data, size,
-                               ciphertext.data(), ciphertext.size());
+                                ciphertext.data(), ciphertext.size());
     if (ec) {
       // TODO: Handle ec
       std::cerr << "Error while encrypting data\n";
@@ -128,18 +147,18 @@ class RequestProcessor {
                     << to_hex(message.to_string_view()) << '\n';
 
           std::size_t offset = 0;
-          auto type = Unpack<MessageType>(message.data<char>(),
-                                          message.size(), offset)
-                      .value_or(MessageType::UNKNOWN);
-          auto request_id = Unpack<req_id_t>(message.data<char>(),
-                                             message.size(), offset)
-                            .value_or(0);
+          const auto type = Unpack<MessageType>(message.data<char>(),
+                                                message.size(), offset)
+                            .value_or(MessageType::UNKNOWN);
+          const auto request_id = Unpack<req_id_t>(message.data<char>(),
+                                                   message.size(), offset)
+                                  .value_or(0);
           if (0 == request_id) {
             std::cerr << "Error: server_loop() - request_id is 0!\n";
             continue;
           }
 
-          auto promise_handle = [this, request_id]() {
+          const auto promise_handle = [this, request_id]() {
             std::lock_guard lck{promises_mtx_};
             return promises_.extract(request_id);
           }();
@@ -161,7 +180,7 @@ class RequestProcessor {
 
           Unpack<Bytes>(message.data<char>(), message.size(), offset)
               .map([this, &promise](crypto::Bytes&& ciphertext){
-                auto maybe_cleartext = dec_ctx_->Decrypt(ciphertext);
+                const auto maybe_cleartext = dec_ctx_->Decrypt(ciphertext);
                 if (std::holds_alternative<std::error_code>(
                         maybe_cleartext)) {
                   std::cerr << "Error decrypting message\n";

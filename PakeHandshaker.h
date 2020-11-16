@@ -643,7 +643,7 @@ class PakeHandshaker : public Handshaker<PakeHandshaker> {
 
   friend class Handshaker;
 };
-size_t PakeHandshaker::auth_number = 0;
+inline size_t PakeHandshaker::auth_number = 0;
 MSGPACK_ADD_ENUM(PakeHandshaker::Step);
 
 #endif /* PAKEHANDSHAKER_H */

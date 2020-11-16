@@ -251,8 +251,9 @@ class Server {
             std::get<crypto::SodiumDecryptionContext>(ci.decryption_ctx);
 
         auto ec = dec_ctx.Initialize(
-              dec_key.data(), dec_key.size(),
-              dec_header.value().data(), dec_header.value().size());
+            dec_key.data(), dec_key.size(),
+            dec_header.value().data(), dec_header.value().size());
+
         if (ec) {
           LOG_ERROR(
               client_log("Protocol error while initializing decryption "
@@ -322,8 +323,8 @@ class Server {
             std::get<crypto::SodiumDecryptionContext>(ci.decryption_ctx);
 
         auto ec = dec_ctx.Initialize(
-              dec_key.data(), dec_key.size(),
-              dec_header.value().data(), dec_header.value().size());
+            dec_key.data(), dec_key.size(),
+            dec_header.value().data(), dec_header.value().size());
         if (ec) {
           LOG_ERROR(
               client_log("Protocol error while initializing decryption "
@@ -354,7 +355,7 @@ class Server {
         LOG_TRACE(client_log("request id: {}", request_id));
 
         if (not (std::holds_alternative<crypto::SodiumEncryptionContext>(
-                     ci.encryption_ctx) and
+                ci.encryption_ctx) and
                  std::holds_alternative<crypto::SodiumDecryptionContext>(
                      ci.decryption_ctx))) {
           LOG_ERROR(client_log("Inconsistent state in client's context. "
@@ -407,20 +408,20 @@ class Server {
         tl::expected<MessageHandlerResult, bool> cleartext_response =
             [this, &maybe_cleartext, &client_log]()
             -> tl::expected<MessageHandlerResult, bool> {
-              try {
-                return user_data_handler_(
-                    std::move(std::get<crypto::Bytes>(maybe_cleartext)));
-              } catch (const std::exception& e) {
-                LOG_ERROR(client_log(
-                    "Throw in the user's message handler: {}", e.what()));
-                return tl::unexpected(false);
-              } catch (...) {
-                LOG_ERROR(client_log(
-                    "Throw in the user's message handler. Type of the "
-                    "exception unknown, so no more data provided."));
-                return tl::unexpected(false);
-              }
-            }();
+          try {
+            return user_data_handler_(
+                std::move(std::get<crypto::Bytes>(maybe_cleartext)));
+          } catch (const std::exception& e) {
+            LOG_ERROR(client_log(
+                "Throw in the user's message handler: {}", e.what()));
+            return tl::unexpected(false);
+          } catch (...) {
+            LOG_ERROR(client_log(
+                "Throw in the user's message handler. Type of the "
+                "exception unknown, so no more data provided."));
+            return tl::unexpected(false);
+          }
+        }();
 
         if (not cleartext_response) {
           message[2] = make_msg(MessageType::PROTOCOL_ERROR, request_id);
@@ -486,7 +487,7 @@ class Server {
     LOG_TRACE("Message contents: {}", message.str());
 
     const std::string client_id{
-          message[0].data<char>(), message[0].size()};
+      message[0].data<char>(), message[0].size()};
     assert(not client_id.empty());
 
     std::stringstream buffer;

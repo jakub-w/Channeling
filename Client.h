@@ -323,7 +323,7 @@ class Client {
   [[nodiscard]]
   inline MaybeResponse
   Request(const Container& data,
-          const TimeoutT& timeout = std::chrono::seconds::max())
+          const TimeoutT& timeout = std::chrono::seconds(1800))
       noexcept {
     return Request(std::data(data), std::size(data), timeout);
   }
@@ -439,7 +439,6 @@ class Client {
 
   inline auto send_to_server(zmq::message_t&& message) {
     socket_.send(zmq::const_buffer(nullptr, 0), zmq::send_flags::sndmore);
-    // socket_.send(zmq::str_buffer(""), zmq::send_flags::sndmore);
     return socket_.send(std::move(message), zmq::send_flags::dontwait);
   }
 

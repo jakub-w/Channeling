@@ -89,7 +89,6 @@ Unpack(const char* data, std::size_t size, std::size_t& offset) {
     const auto handle = msgpack::unpack(data, size, offset);
     const auto object = handle.get();
     return object.as<T>();
-  // } catch (const msgpack::unpack_error& e) {
   } catch (const std::exception& e) {
     LOG_ERROR("Unpacking error: {}", e.what());
     return tl::unexpected{std::make_error_code(
@@ -104,7 +103,6 @@ Unpack(const char* data, std::size_t size) {
     const auto handle = msgpack::unpack(data, size);
     const auto object = handle.get();
     return object.as<T>();
-  // } catch (const msgpack::unpack_error& e) {
   } catch (const std::exception& e) {
     LOG_ERROR("Unpacking error: {}", e.what());
     return tl::unexpected{std::make_error_code(
@@ -127,11 +125,11 @@ zmq::message_t make_msg(const Args&... args) {
   return zmq::message_t{buffer_str.data(), buffer_str.size()};
 }
 
-auto make_unexpected(std::errc errc) {
+inline auto make_unexpected(std::errc errc) {
   return tl::unexpected{std::make_error_code(errc)};
 }
 
-std::error_code recv_from_dealer(
+inline std::error_code recv_from_dealer(
       zmq::socket_ref socket, zmq::message_t& message,
       zmq::recv_flags flags = zmq::recv_flags::none) {
   std::vector<zmq::message_t> msgs;

@@ -42,6 +42,19 @@ enum class HandshakerMessageType_internal {
   };
 }
 
+constexpr auto
+HandshakerMessageTypeName(HandshakerMessageType_internal type) {
+  switch (type) {
+    case HandshakerMessageType_internal::MESSAGE:
+      return "MESSAGE";
+    case HandshakerMessageType_internal::KEYS:
+      return "KEYS";
+    case HandshakerMessageType_internal::KEYS_AND_MESSAGE:
+      return "KEYS_AND_MESSAGE";
+  }
+  return "UNKNOWN";
+}
+
 // The messages handshaker receives are zmq multipart messages. The first
 // frame is a client id, the second one is empty, the third one contains
 // msgpack packed data with the first object being MessageType and the rest

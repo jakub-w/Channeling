@@ -23,9 +23,11 @@
 
 #include <algorithm>
 #include <variant>
+
 #include <zmq.hpp>
 
 #include "EncryptionCommon.h"
+#include "Logging.h"
 #include "ProtocolCommon.h"
 #include "Util.h"
 
@@ -475,10 +477,11 @@ class PakeHandshaker : public Handshaker<PakeHandshaker> {
 
  private:
   void worker() {
+    LOG_DEBUG("PAKE handshaker starting...");
     try {
       socket_.bind(address_);
     } catch (const zmq::error_t& e) {
-      std::cerr << "Zmq exception thrown on bind(): " << e.what() << '\n';
+      LOG_ERROR("Couldn't bind the handshaker: {}", e.what());
       return;
     }
 
@@ -490,7 +493,9 @@ class PakeHandshaker : public Handshaker<PakeHandshaker> {
       try {
         zmq::poll(items.data(), items.size(), std::chrono::milliseconds(500));
       } catch (const zmq::error_t& e) {
-        std::cout << "Handshaker poll error: " << e.what() << '\n';
+        if (EINTR != e.num()) {
+          LOG_ERROR("Handshaker poll error: {}", e.what());
+        }
         break;
       }
 
@@ -500,9 +505,12 @@ class PakeHandshaker : public Handshaker<PakeHandshaker> {
 
         zmq::multipart_t message(socket_);
 
-        std::cout << "Handshaker received: " << message.str() << "\n\n";
-
-        // FIXME: Check if the message has 3 frames
+        if (3 != message.size()) {
+          LOG_ERROR("Handshaker received an unexpectedly structured "
+                    "message. Frames: {}. Discarding", message.size());
+          LOG_TRACE("Contents: {}", message.str());
+          continue;
+        }
 
         auto client_id = std::string{message[0].data<char>(),
           message[0].size()};
@@ -512,6 +520,11 @@ class PakeHandshaker : public Handshaker<PakeHandshaker> {
 
         const auto type = Unpack<MessageType>(data, data_size, offset)
                     .value_or(MessageType::BAD_MESSAGE);
+
+        LOG_DEBUG(
+            "Handshaker received a message. Type: {}, client id: {}",
+            MessageTypeName(type), client_id);
+        LOG_TRACE("Contents: ", message.str());
 
         if (client_id.empty() or
             MessageType::AUTH != type) {
@@ -544,8 +557,7 @@ class PakeHandshaker : public Handshaker<PakeHandshaker> {
 
               message[2].rebuild(buffer_str.data(), buffer_str.size());
 
-              std::cout << "Sending back:\n";
-              std::cout << message.str() << "\n\n";
+              LOG_DEBUG("Handshaker sending MESSAGE message");
             },
             [&](EncKeys& keys) {
               // Send just the keys on the socket
@@ -556,8 +568,7 @@ class PakeHandshaker : public Handshaker<PakeHandshaker> {
               const auto buffer_str = buffer.str();
               message[2].rebuild(buffer_str.data(), buffer_str.size());
 
-              std::cout << "Sending crypto keys:\n";
-              std::cout << message.str() << "\n\n";
+              LOG_DEBUG("Handshaker sending KEYS message");
             },
             [&](std::pair<PartialMessage, EncKeys>& pair) {
               // Send the message and the keys
@@ -574,15 +585,16 @@ class PakeHandshaker : public Handshaker<PakeHandshaker> {
               const auto buffer_str = buffer.str();
               message[2].rebuild(buffer_str.data(), buffer_str.size());
 
-              std::cout << "Sending crypto keys and a message:";
-              std::cout << message.str() << "\n\n";
+              LOG_DEBUG("Handshaker sending KEYS_AND_MESSAGE message");
             }},
           result);
 
+        LOG_TRACE("Contents: {}", message.str());
         message.send(socket_);
       }
     }
-    std::cout << "Handshaker stopped\n";
+
+    LOG_DEBUG("Handshaker stopped");
   }
 
   static std::optional<EcPoint> make_key_material(

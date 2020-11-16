@@ -21,20 +21,23 @@
 
 #include <algorithm>
 #include <functional>
-#include <iostream>
 #include <memory>
 #include <string_view>
 #include <unordered_map>
-
 #include <variant>
+
+#include <msgpack.hpp>
+
+#include <spdlog/spdlog.h>
+
 #include <zmq.h>
 #include <zmq.hpp>
 #include <zmq_addon.hpp>
 
-#include <msgpack.hpp>
-
 #include "SodiumCipherStream/SodiumCipherStream.h"
 
+#include "Handshaker.h"
+#include "Logging.h"
 #include "ProtocolCommon.h"
 #include "ServerSFINAE.h"
 #include "Util.h"
@@ -80,6 +83,7 @@ class Server {
   }
 
   constexpr void Bind(std::string_view address) {
+    LOG_INFO("Binding the server to {}", address);
     socket_.bind(address.data());
   }
 
@@ -91,6 +95,8 @@ class Server {
   void Run() {
     if (run.exchange(true)) return;
 
+    LOG_INFO("Server starting...");
+
     handshaker_->Start();
     handshaker_socket_.connect(handshaker_->GetAddress());
 
@@ -99,11 +105,15 @@ class Server {
         {static_cast<void*>(handshaker_socket_), 0, ZMQ_POLLIN, 0}
       }};
 
+    LOG_INFO("Waiting for requests...");
+
     while (run) {
       try {
         zmq::poll(items.data(), items.size(), std::chrono::milliseconds(500));
       } catch (const zmq::error_t& e) {
-        std::cout << "Run() poll error: " << e.what() << '\n';
+        if (EINTR != e.num()) {
+          LOG_ERROR("Run() poll error: {}", e.what());
+        }
         break;
       }
 
@@ -118,7 +128,7 @@ class Server {
       }
     }
 
-    std::cout << "Server exiting...\n";
+    LOG_INFO("Server exiting...");
   }
 
  private:
@@ -131,11 +141,12 @@ class Server {
 
   void handle_incoming() {
     zmq::multipart_t message{socket_};
-    std::cout << "Server received message: " << message.str() << '\n';
 
     if (message.size() != 3) {
       // Unexpected message structure
-      std::cerr << "Client sent bad message: " << message.str() << '\n';
+      LOG_WARN("Client sent unexpectedly structured message. Frames: {}",
+               message.size());
+      LOG_TRACE("Message contents: {}", message.str());
 
       socket_.send(message[0], zmq::send_flags::sndmore);
       socket_.send(message[1], zmq::send_flags::sndmore);
@@ -147,7 +158,15 @@ class Server {
 
     const std::string
         client_id{message[0].data<char>(), message[0].size()};
-    std::cout << "Client id: " << to_hex(client_id) << '\n';
+
+    const auto client_log = [&client_id](const auto& format_string,
+                                         const auto&... args) {
+      return fmt::format(
+          "Client id: {}, {}",
+          client_id,
+          fmt::format(std::forward<decltype(format_string)>(format_string),
+                      std::forward<decltype(args)>(args)...));
+    };
 
     std::size_t offset = 0;
 
@@ -155,26 +174,30 @@ class Server {
                                           message[2].size(),
                                           offset)
                       .value_or(MessageType::BAD_MESSAGE);
-    std::cout << "Message type: " << MessageTypeName(type) << '\n';
+    LOG_DEBUG("Message received: from: {}, type: {}" ,
+              client_id, MessageTypeName(type));
+    LOG_TRACE("Message contents: {}", message.str());
+
 
     if (not clients[client_id].authenticated
         and (not std::any_of(allowed_before_auth.cbegin(),
                              allowed_before_auth.cend(),
                              [=](MessageType t){ return t == type; }))) {
+      LOG_WARN(client_log("Client '{}' sent wrong type message before "
+                          "authenticating. Denying...", client_id));
       message[2] = make_msg(MessageType::DENY);
-
       message.send(socket_);
       return;
     }
 
     switch (type) {
       case MessageType::BAD_MESSAGE:
-        std::cerr << "Client sent BAD_MESSGE. Protocol error?\n";
+        LOG_WARN(client_log("Client sent BAD_MESSGE. Protocol error?"));
         message[2] = make_msg(MessageType::ACK);
         message.send(socket_);
         return;
       case MessageType::DENY:
-        std::cerr << "Client denied the connection\n";
+        LOG_WARN(client_log("Client denied the connection"));
         message[2] = make_msg(MessageType::ACK);
         message.send(socket_);
         return;
@@ -187,8 +210,9 @@ class Server {
         return;
       }
       case MessageType::AUTH: {
+        LOG_DEBUG(
+            client_log("Forwarding AUTH message to the handshaker"));
         message.send(handshaker_socket_);
-        std::cout << "Forwarded to the handshaker\n\n";
         break;
       }
       case MessageType::AUTH_CONFIRM: {
@@ -206,14 +230,16 @@ class Server {
 
         if (not (std::holds_alternative<CryptoKey>(ci.decryption_ctx) and
                  std::holds_alternative<CryptoKey>(ci.encryption_ctx))) {
-          std::cerr << "Client state is inconsistent. Can't proceed with "
-              "encryption setup\n";
+          LOG_ERROR(client_log("Client's context state is inconsistent. "
+                               "Can't proceed with encryption setup"));
           send_protocol_error();
           break;
         }
 
         if (not dec_header.has_value()) {
-          std::cerr << "Received malformed encryption header from client\n";
+          LOG_ERROR(
+              client_log("Received malformed encryption header from client "
+                         "'{}'", client_id));
           send_protocol_error();
           break;
         }
@@ -228,8 +254,9 @@ class Server {
               dec_key.data(), dec_key.size(),
               dec_header.value().data(), dec_header.value().size());
         if (ec) {
-          std::cerr << "Protocol error while initializing decryption "
-              "context\n";
+          LOG_ERROR(
+              client_log("Protocol error while initializing decryption "
+                         "context for '{}'", client_id));
           send_protocol_error();
           break;
         }
@@ -243,15 +270,16 @@ class Server {
         ec = enc_ctx.Initialize(enc_key.data(), enc_key.size(),
                                 enc_header.data(), enc_header.size());
         if (ec) {
-          std::cerr << "Protocol error while initializing encryption "
-              "context\n";
+          LOG_ERROR(
+              client_log("Protocol error while initializing encryption "
+                         "context for '{}'", client_id));
           send_protocol_error();
           break;
         }
 
         ci.authenticated = true;
 
-        std::cout << "Sending AUTH_FINISHED to client\n";
+        LOG_DEBUG(client_log("Sending AUTH_FINISHED to client"));
 
         message[2] = make_msg(MessageType::AUTH_FINISHED, enc_header);
         message.send(socket_);
@@ -273,14 +301,16 @@ class Server {
         if (not (std::holds_alternative<CryptoKey>(ci.decryption_ctx) and
                  std::holds_alternative<crypto::SodiumEncryptionContext>(
                      ci.encryption_ctx))) {
-          std::cerr << "Client state is inconsistent. Can't proceed with "
-              "encryption setup\n";
+          LOG_ERROR(
+              client_log("Client state is inconsistent. Can't proceed with "
+                         "encryption setup"));
           send_protocol_error();
           break;
         }
 
         if (not dec_header.has_value()) {
-          std::cerr << "Received malformed encryption header from client\n";
+          LOG_ERROR(
+              client_log("Received malformed encryption header from client"));
           send_protocol_error();
           break;
         }
@@ -295,8 +325,9 @@ class Server {
               dec_key.data(), dec_key.size(),
               dec_header.value().data(), dec_header.value().size());
         if (ec) {
-          std::cerr << "Protocol error while initializing decryption "
-              "context\n";
+          LOG_ERROR(
+              client_log("Protocol error while initializing decryption "
+                         "context\n"));
           send_protocol_error();
           break;
         }
@@ -308,25 +339,26 @@ class Server {
         break;
       }
       case MessageType::ENCRYPTED_DATA: {
-        std::cout << "Encrypted data received\n";
-
         auto& ci = clients[client_id];
 
         auto request_id = Unpack<req_id_t>(message[2].data<char>(),
                                            message[2].size(), offset)
                           .value_or(0);
         if (0 == request_id) {
-          std::cerr << "Error: Client didn't include request id with the "
-              "request\n";
+          LOG_ERROR(client_log("Client didn't include request id "
+                               "with the request"));
           message[2] = make_msg(MessageType::PROTOCOL_ERROR);
           message.send(socket_);
           break;
         }
+        LOG_TRACE(client_log("request id: {}", request_id));
 
         if (not (std::holds_alternative<crypto::SodiumEncryptionContext>(
                      ci.encryption_ctx) and
                  std::holds_alternative<crypto::SodiumDecryptionContext>(
                      ci.decryption_ctx))) {
+          LOG_ERROR(client_log("Inconsistent state in client's context. "
+                               "Can't proceed with the decryption"));
           message[2] = make_msg(MessageType::PROTOCOL_ERROR, request_id);
           message.send(socket_);
           break;
@@ -337,8 +369,8 @@ class Server {
         auto maybe_ciphertext = Unpack<Bytes>(message[2].data<char>(),
                                               message[2].size(), offset);
         if (not maybe_ciphertext) {
-          std::cerr << "Error unpacking ciphertext: "
-                    << maybe_ciphertext.error().message() << '\n';
+          LOG_ERROR(client_log("Error unpacking ciphertext: {}",
+                               maybe_ciphertext.error().message()));
           message[2] = make_msg(MessageType::PROTOCOL_ERROR, request_id);
           message.send(socket_);
           break;
@@ -351,16 +383,21 @@ class Server {
 
         if (std::holds_alternative<std::error_code>(maybe_cleartext)) {
           auto ec = std::get<std::error_code>(maybe_cleartext);
-          if (ec == std::errc::bad_message or
-              ec == std::errc::operation_not_permitted){
-            std::cerr << "PROTOCOL_ERROR on Decrypt()\n";
-            std::cerr << ec << '\n';
+          if (ec == std::errc::bad_message){
+            LOG_ERROR(client_log("Couldn't decrypt. Bad message sent by "
+                                 "the client"));
+            message[2] = make_msg(MessageType::PROTOCOL_ERROR, request_id);
+          } else if (ec == std::errc::operation_not_permitted) {
+            LOG_ERROR(client_log("Couldn't decrypt. Decryption context "
+                                 "is uninitialized"));
             message[2] = make_msg(MessageType::PROTOCOL_ERROR, request_id);
           } else if (ec == std::errc::invalid_argument){
-            std::cerr << "Bad argument for Decrypt()\n";
+            LOG_ERROR(client_log("One of the buffers for decryption "
+                                 "has wrong size"));
             message[2] = make_msg(MessageType::PROTOCOL_ERROR, request_id);
           } else if (ec == std::errc::connection_aborted){
-            std::cerr << "Connection aborted on Decrypt()\n";
+            LOG_WARN(client_log("Encrypted message stored stream abort "
+                                "command"));
             message[2] = make_msg(MessageType::ACK, request_id);
           }
           message.send(socket_);
@@ -368,19 +405,19 @@ class Server {
         }
 
         tl::expected<MessageHandlerResult, bool> cleartext_response =
-            [this, &maybe_cleartext]()
+            [this, &maybe_cleartext, &client_log]()
             -> tl::expected<MessageHandlerResult, bool> {
               try {
                 return user_data_handler_(
                     std::move(std::get<crypto::Bytes>(maybe_cleartext)));
               } catch (const std::exception& e) {
-                std::cerr << "Throw in the user's message handler: "
-                          << e.what() << '\n';
+                LOG_ERROR(client_log(
+                    "Throw in the user's message handler: {}", e.what()));
                 return tl::unexpected(false);
               } catch (...) {
-                std::cerr <<
+                LOG_ERROR(client_log(
                     "Throw in the user's message handler. Type of the "
-                    "exception unknown, so no more data provided.\n";
+                    "exception unknown, so no more data provided."));
                 return tl::unexpected(false);
               }
             }();
@@ -397,13 +434,18 @@ class Server {
             enc_ctx.Encrypt(std::data(cleartext_response.value()),
                             std::size(cleartext_response.value()));
         if (std::holds_alternative<std::error_code>(enc_result)) {
+          // TODO: Handle error codes
           // auto ec = std::get<std::error_code>(enc_result);
-          std::cerr << "Error encrypting data\n";
+          LOG_ERROR(client_log("Error encrypting data"));
 
           message[2] = make_msg(MessageType::PROTOCOL_ERROR, request_id);
           message.send(socket_);
           break;
         }
+
+        LOG_TRACE(client_log(
+            "Sending encrypted data to the client: {}",
+            to_hex(std::get<crypto::Bytes>(enc_result))));
 
         message[2] = make_msg(MessageType::ENCRYPTED_DATA,
                               request_id,
@@ -413,9 +455,8 @@ class Server {
         break;
       }
       default: {
-        std::cerr << "Unhandled message type: "
-                  << MessageTypeName(type) << "\n\n";
-
+        LOG_ERROR(client_log("Unhandled message type: {}",
+                             MessageTypeName(type)));
         message[2] = make_msg(MessageType::BAD_MESSAGE);
         message.send(socket_);
         break;
@@ -431,8 +472,6 @@ class Server {
     //       ci.suspicious_actions and if it hits a certain number, block
     //       any connection attempts for some time.
 
-    std::cout << "Server: message from the handshaker. "
-        "Passing to the client...\n\n";
     zmq::multipart_t message(handshaker_socket_);
 
     assert(message.size() == 3);
@@ -442,6 +481,9 @@ class Server {
         message[2].data<char>(), message[2].size(), offset);
 
     assert(type.has_value());
+    LOG_DEBUG("Received {} message from the handshaker",
+              HandshakerMessageTypeName(type.value()));
+    LOG_TRACE("Message contents: {}", message.str());
 
     const std::string client_id{
           message[0].data<char>(), message[0].size()};
@@ -451,7 +493,7 @@ class Server {
 
     switch (type.value()) {
       case HandshakerMessageType::MESSAGE: {
-        std::cout << "Passing message to peer\n";
+        LOG_DEBUG("Passing handshaker message to peer: {}", client_id);
 
         buffer.write(message[2].data<char>() + offset,
                      message[2].size() - offset);
@@ -460,12 +502,12 @@ class Server {
         break;
       }
       case HandshakerMessageType::KEYS: {
-        std::cout << "Keys received from the handshaker\n";
-
         auto maybe_keypair = Unpack<EncKeys>(message[2].data<char>(),
                                              message[2].size(),
                                              offset);
         if (not maybe_keypair) {
+          LOG_ERROR("Failed to unpack encryption keys sent from the"
+                    " handshaker. Client id: {}", client_id);
           send_msg(socket_, client_id, MessageType::PROTOCOL_ERROR);
           return;
         }
@@ -486,9 +528,12 @@ class Server {
             enc_header.data(), enc_header.size());
 
         if (ec) {
+          LOG_ERROR("Error initializing encryption context for client "
+                    "'{}'", client_id);
           msgpack::pack(buffer, MessageType::PROTOCOL_ERROR);
-          std::cerr << "Error initializing encryption context for client\n";
         } else {
+          LOG_DEBUG("Encryption context for '{}' initialized. Sending "
+                    "AUTH_CONFIRM");
           msgpack::pack(buffer, MessageType::AUTH_CONFIRM);
           msgpack::pack(buffer, enc_header);
         }
@@ -496,13 +541,12 @@ class Server {
         break;
       }
       case HandshakerMessageType::KEYS_AND_MESSAGE: {
-        std::cout << "Keys and a message received from the handshaker\n";
-
         auto maybe_keypair = Unpack<EncKeys>(message[2].data<char>(),
                                              message[2].size(),
                                              offset);
         if (not maybe_keypair) {
-          std::cerr << "Protocol error!\n";
+          LOG_ERROR("Failed to unpack encryption keys sent from the"
+                    " handshaker. Client id: {}", client_id);
           send_msg(socket_, client_id, MessageType::PROTOCOL_ERROR);
           return;
         }
@@ -516,6 +560,8 @@ class Server {
 
         ci.encryption_ctx = std::move(keypair.get<0>());
         ci.decryption_ctx = std::move(keypair.get<1>());
+
+        LOG_DEBUG("Passing handshaker message to peer: {}", client_id);
 
         buffer.write(message[2].data<char>() + offset,
                      message[2].size() - offset);
@@ -532,7 +578,7 @@ class Server {
     const auto buffer_str = buffer.str();
     socket_.send(zmq::const_buffer(buffer_str.data(), buffer_str.size()),
                  zmq::send_flags::dontwait);
-    std::cout << "Message sent to the client\n";
+    LOG_DEBUG("Message sent to client '{}'", client_id);
   }
 
   // -------------------- PRIVATE FIELDS --------------------

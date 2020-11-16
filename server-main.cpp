@@ -51,7 +51,6 @@ int main() {
 
   server.Bind("ipc:///tmp/zeromq-server");
 
-  std::cout << "Starting the server...\n";
   server.Run();
 }
 

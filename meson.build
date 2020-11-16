@@ -44,10 +44,11 @@ endif
 zmq_dep = dependency('libzmq')
 sodium_dep = dependency('libsodium')
 msgpack_dep = dependency('msgpack')
+spdlog_dep = dependency('spdlog')
 
 meson.get_compiler('cpp').check_header('tl/expected.hpp', required: true)
 
-required_deps = [zmq_dep, sodium_dep, msgpack_dep]
+required_deps = [zmq_dep, sodium_dep, msgpack_dep, spdlog_dep]
 
 
 # Subprojects

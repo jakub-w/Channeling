@@ -3,13 +3,14 @@
 
 #include <future>
 #include <mutex>
-
 #include <utility>
+
 #include <zmq.hpp>
 #include <zmq_addon.hpp>
 
-#include "SodiumCipherStream/SodiumCipherStream.h"
+#include "Logging.h"
 #include "ProtocolCommon.h"
+#include "SodiumCipherStream/SodiumCipherStream.h"
 #include "Util.h"
 
 class RequestProcessor {
@@ -90,18 +91,18 @@ class RequestProcessor {
                                 ciphertext.data(), ciphertext.size());
     if (ec) {
       // TODO: Handle ec
-      std::cerr << "Error while encrypting data\n";
+      LOG_ERROR("Error while encrypting data");
       return make_error(std::errc::protocol_error);
     }
 
-    std::cout << "Sending to server...\n";
+    LOG_DEBUG("Sending ENCRYPTED_DATA message to the server");
     try {
+      auto msg = make_msg(MessageType::ENCRYPTED_DATA, num, ciphertext);
       std::lock_guard lck(send_mtx_);
       server_.send(zmq::str_buffer(""), zmq::send_flags::sndmore);
-      server_.send(make_msg(MessageType::ENCRYPTED_DATA, num, ciphertext),
-                   zmq::send_flags::dontwait);
+      server_.send(std::move(msg), zmq::send_flags::dontwait);
     } catch (const std::exception& e) {
-      std::cerr << "Error packing or sending message: " << e.what() << '\n';
+      LOG_ERROR("Error packing or sending a message: {}", e.what());
       return make_error(std::errc::protocol_error);
     }
 
@@ -132,7 +133,9 @@ class RequestProcessor {
       try {
         zmq::poll(items.data(), items.size(), std::chrono::milliseconds(500));
       } catch (const zmq::error_t& e) {
-        std::cerr << "Error on poll: " << e.what() << '\n';
+        if (EINTR != e.num()) {
+          LOG_ERROR("Poll error: {}", e.what());
+        }
         running_ = false;
         return;
       }
@@ -140,12 +143,10 @@ class RequestProcessor {
       if (items[0].revents & ZMQ_POLLIN) {
         try {
           if (recv_from_dealer(server_, message)) { // returned an error code
-            std::cerr << "Received bad message. Discarding.\n";
+            LOG_ERROR("Received an unexpectedly structured message. "
+                      "Discarding.");
             continue;
           }
-
-          std::cout << "server_loop() - message received: "
-                    << to_hex(message.to_string_view()) << '\n';
 
           std::size_t offset = 0;
           const auto type = Unpack<MessageType>(message.data<char>(),
@@ -154,8 +155,13 @@ class RequestProcessor {
           const auto request_id = Unpack<req_id_t>(message.data<char>(),
                                                    message.size(), offset)
                                   .value_or(0);
+          LOG_DEBUG("Message received. Type: {}, request id: {}",
+                    type, request_id);
+          LOG_TRACE("Contents: {}", to_hex(message.to_string_view()));
+
           if (0 == request_id) {
-            std::cerr << "Error: server_loop() - request_id is 0!\n";
+            LOG_ERROR("Bad message received, containing not allowed "
+                      "request id of 0 (or none at all)");
             continue;
           }
 
@@ -165,16 +171,16 @@ class RequestProcessor {
           }();
 
           if (promise_handle.empty()) {
-            std::cerr << "Error: server_loop() - request_id of '"
-                      << request_id << "' is invalid!\n";
+            LOG_ERROR("Received message has an invalid request id. "
+                      "It doesn't match any of the awaiting requests");
             continue;
           }
 
           auto& promise = promise_handle.mapped();
 
           if (MessageType::ENCRYPTED_DATA != type) {
-            std::cerr << "Wrong message received - type: "
-                      << MessageTypeName(type) << '\n';
+            LOG_ERROR("Received message has a wrong type: {}",
+                      MessageTypeName(type));
             promise.set_value(make_unexpected(std::errc::protocol_error));
             continue;
           }
@@ -184,7 +190,7 @@ class RequestProcessor {
                 const auto maybe_cleartext = dec_ctx_->Decrypt(ciphertext);
                 if (std::holds_alternative<std::error_code>(
                         maybe_cleartext)) {
-                  std::cerr << "Error decrypting message\n";
+                  LOG_ERROR("Error decrypting received message");
                   promise.set_value(
                       make_unexpected(std::errc::protocol_error));
                   return;
@@ -194,16 +200,16 @@ class RequestProcessor {
                     std::get<crypto::Bytes>(maybe_cleartext)));
               })
               .or_else([&promise](std::error_code&& /*ec*/){
-                std::cerr << "Error unpacking message\n";
+                LOG_ERROR("Error unpacking received message");
                 promise.set_value(make_unexpected(std::errc::protocol_error));
               });
         } catch (const std::exception& e) {
-          std::cerr << "Error when handling user data message: " << e.what()
-                    << '\n';
+          LOG_ERROR("Error when handling user data message: {}",
+                        e.what());
           running_ = false;
           return;
         } catch (...) {
-          std::cerr << "Error when handling user data message\n";
+          LOG_ERROR("Unknown error when handling user data message");
           running_ = false;
           return;
         }

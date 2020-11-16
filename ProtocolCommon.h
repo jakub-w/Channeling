@@ -20,12 +20,13 @@
 #define PROTOCOLCOMMON_H
 
 #include <array>
-#include <iostream>
 
 #include <msgpack.hpp>
 #include <tl/expected.hpp>
 #include <zmq.hpp>
 #include <zmq_addon.hpp>
+
+#include "Logging.h"
 
 using CryptoKey = std::array<unsigned char, 32>;
 using EncKeys = msgpack::type::tuple<CryptoKey, CryptoKey>;
@@ -90,7 +91,7 @@ Unpack(const char* data, std::size_t size, std::size_t& offset) {
     return object.as<T>();
   // } catch (const msgpack::unpack_error& e) {
   } catch (const std::exception& e) {
-    std::cerr << "Unpacking error: " << e.what() << '\n';
+    LOG_ERROR("Unpacking error: {}", e.what());
     return tl::unexpected{std::make_error_code(
         std::errc::no_message_available)};
   }
@@ -105,7 +106,7 @@ Unpack(const char* data, std::size_t size) {
     return object.as<T>();
   // } catch (const msgpack::unpack_error& e) {
   } catch (const std::exception& e) {
-    std::cerr << "Unpacking error: " << e.what() << '\n';
+    LOG_ERROR("Unpacking error: {}", e.what());
     return tl::unexpected{std::make_error_code(
         std::errc::no_message_available)};
   }

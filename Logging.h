@@ -1,5 +1,5 @@
-#ifndef C_LOGGING_H_
-#define C_LOGGING_H_
+#ifndef CHANNELING_LOGGING_H_
+#define CHANNELING_LOGGING_H_
 
 #include <spdlog/spdlog.h>
 
@@ -37,4 +37,4 @@
     spdlog::critical(__VA_ARGS__);                                      \
   }
 
-#endif  // C_LOGGING_H_
+#endif  // CHANNELING_LOGGING_H_

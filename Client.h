@@ -16,8 +16,8 @@
 // along with Lelo Remote Music Player. If not, see
 // <https://www.gnu.org/licenses/>.
 
-#ifndef CLIENT_H
-#define CLIENT_H
+#ifndef CHANNELING_CLIENT_H
+#define CHANNELING_CLIENT_H
 
 #include <chrono>
 #include <exception>
@@ -46,6 +46,7 @@
 #include "RequestProcessor.h"
 #include "Util.h"
 
+namespace Channeling {
 template <typename Handshaker>
 class Client {
   using HandshakerMessageType = typename Handshaker::HandshakerMessageType;
@@ -456,5 +457,6 @@ class Client {
 
   RequestProcessor req_processor_;
 };
+}
 
-#endif /* CLIENT_H */
+#endif /* CHANNELING_CLIENT_H */

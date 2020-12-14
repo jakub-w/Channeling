@@ -16,8 +16,8 @@
 // along with Lelo Remote Music Player. If not, see
 // <https://www.gnu.org/licenses/>.
 
-#ifndef ENCRYPTIONCOMMON_H
-#define ENCRYPTIONCOMMON_H
+#ifndef CHANNELING_ENCRYPTIONCOMMON_H
+#define CHANNELING_ENCRYPTIONCOMMON_H
 
 #include <algorithm>
 #include <array>
@@ -28,6 +28,7 @@
 #include <sodium.h>
 #include <msgpack.hpp>
 
+namespace Channeling {
 using byte = unsigned char;
 using EcPoint = std::array<byte, crypto_core_ristretto255_BYTES>;
 using EcScalar = std::array<byte, crypto_core_ristretto255_SCALARBYTES>;
@@ -287,5 +288,6 @@ static void derive_keys(const EcPoint& key_material, Ts&... args) {
 
   derive_keys_internal(key_material, 1, args...);
 }
+}
 
-#endif /* ENCRYPTIONCOMMON_H */
+#endif /* CHANNELING_ENCRYPTIONCOMMON_H */

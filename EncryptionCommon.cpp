@@ -18,6 +18,7 @@
 
 #include "EncryptionCommon.h"
 
+namespace Channeling {
 EcScalar make_secret(std::string_view password) {
   static_assert(sizeof(decltype(password)::value_type) == sizeof(byte));
 
@@ -221,4 +222,5 @@ HmacHash make_key_confirmation(const HmacKey& key,
   crypto_auth_hmacsha512_final(&state, hash.data());
 
   return hash;
+}
 }

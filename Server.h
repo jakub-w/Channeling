@@ -16,8 +16,8 @@
 // along with Lelo Remote Music Player. If not, see
 // <https://www.gnu.org/licenses/>.
 
-#ifndef SERVER_H
-#define SERVER_H
+#ifndef CHANNELING_SERVER_H
+#define CHANNELING_SERVER_H
 
 #include <algorithm>
 #include <functional>
@@ -42,6 +42,7 @@
 #include "ServerSFINAE.h"
 #include "Util.h"
 
+namespace Channeling {
 /// \e MessageHandlerResult must be an rvalue, also it must own the data
 /// stored inside of it. The data will be used by an encryption algorithm so
 /// it is crucial for it to live long enough to do that. If this restriction
@@ -604,5 +605,6 @@ class Server {
 
   MessageHandler user_data_handler_;
 };
+}
 
-#endif /* SERVER_H */
+#endif /* CHANNELING_SERVER_H */

@@ -1,6 +1,7 @@
-#ifndef C_SERVERSFINAE_H_
-#define C_SERVERSFINAE_H_
+#ifndef CHANNELING_SERVERSFINAE_H_
+#define CHANNELING_SERVERSFINAE_H_
 
+namespace Channeling {
 namespace {
 template <typename T>
 struct has_size {
@@ -60,5 +61,6 @@ inline constexpr bool has_data_v = has_data<T>::value;
 template <typename T>
 inline constexpr bool has_data_and_size_v = has_size_v<T> and has_data_v<T>;
 }
+}
 
-#endif  // C_SERVERSFINAE_H_
+#endif  // CHANNELING_SERVERSFINAE_H_

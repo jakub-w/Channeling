@@ -16,11 +16,12 @@
 // along with Lelo Remote Music Player. If not, see
 // <https://www.gnu.org/licenses/>.
 
-#ifndef UTIL_H
-#define UTIL_H
+#ifndef CHANNELING_UTIL_H
+#define CHANNELING_UTIL_H
 
 #include <string>
 
+namespace Channeling {
 template<class... Ts> struct overload : Ts... { using Ts::operator()...; };
 template<class... Ts> overload(Ts...) -> overload<Ts...>;
 
@@ -40,5 +41,6 @@ std::string to_hex(const Container& container) {
                 std::distance(std::begin(container),
                               std::end(container)));
 }
+}
 
-#endif /* UTIL_H */
+#endif /* CHANNELING_UTIL_H */

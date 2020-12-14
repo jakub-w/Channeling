@@ -1,5 +1,5 @@
-#ifndef C_REQUESTPROCESSOR_H_
-#define C_REQUESTPROCESSOR_H_
+#ifndef CHANNELING_REQUESTPROCESSOR_H_
+#define CHANNELING_REQUESTPROCESSOR_H_
 
 #include <future>
 #include <mutex>
@@ -13,6 +13,7 @@
 #include "SodiumCipherStream/SodiumCipherStream.h"
 #include "Util.h"
 
+namespace Channeling {
 class RequestProcessor {
  public:
   using MaybeResponse = tl::expected<Bytes, std::error_code>;
@@ -231,5 +232,6 @@ class RequestProcessor {
   std::thread thread_;
   std::atomic_bool running_ = false;
 };
+}
 
-#endif  // C_REQUESTPROCESSOR_H_
+#endif  // CHANNELING_REQUESTPROCESSOR_H_

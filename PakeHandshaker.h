@@ -16,8 +16,8 @@
 // along with Lelo Remote Music Player. If not, see
 // <https://www.gnu.org/licenses/>.
 
-#ifndef PAKEHANDSHAKER_H
-#define PAKEHANDSHAKER_H
+#ifndef CHANNELING_PAKEHANDSHAKER_H
+#define CHANNELING_PAKEHANDSHAKER_H
 
 #include "Handshaker.h"
 
@@ -31,6 +31,7 @@
 #include "ProtocolCommon.h"
 #include "Util.h"
 
+namespace Channeling {
 // Uses J-PAKE algorithm
 class PakeHandshaker : public Handshaker<PakeHandshaker> {
   // FIXME: Use a class based on std::array, but that zeroes its memory on
@@ -643,9 +644,11 @@ class PakeHandshaker : public Handshaker<PakeHandshaker> {
   friend class Handshaker;
 };
 inline size_t PakeHandshaker::auth_number = 0;
-MSGPACK_ADD_ENUM(PakeHandshaker::Step);
+}
 
-#endif /* PAKEHANDSHAKER_H */
+MSGPACK_ADD_ENUM(Channeling::PakeHandshaker::Step);
+
+#endif /* CHANNELING_PAKEHANDSHAKER_H */
 
 // This Handshaker should pass a step id in its message so there's no
 // ambiguity on how to process the received data.

@@ -16,8 +16,8 @@
 // along with Lelo Remote Music Player. If not, see
 // <https://www.gnu.org/licenses/>.
 
-#ifndef HANDSHAKER_H
-#define HANDSHAKER_H
+#ifndef CHANNELING_HANDSHAKER_H
+#define CHANNELING_HANDSHAKER_H
 
 #include <iostream>
 
@@ -27,13 +27,11 @@
 #include <zmq.hpp>
 #include <zmq_addon.hpp>
 
-#include "msgpack.hpp"
+#include <msgpack.hpp>
 
 #include "ProtocolCommon.h"
 
-template <typename T>
-class Channel;
-
+namespace Channeling {
 namespace {
 enum class HandshakerMessageType_internal {
     MESSAGE,
@@ -108,14 +106,10 @@ class Handshaker {
   std::thread thread_;
 
   static size_t socknum_;
-
-  friend class Channel<T>;
 };
 
 template <typename T>
 size_t Handshaker<T>::socknum_ = 0;
-
-MSGPACK_ADD_ENUM(HandshakerMessageType_internal);
 
 
 class StupidHandshaker : public Handshaker<StupidHandshaker> {
@@ -236,5 +230,8 @@ class StupidHandshaker : public Handshaker<StupidHandshaker> {
 
   friend class Handshaker;
 };
+}
 
-#endif /* HANDSHAKER_H */
+MSGPACK_ADD_ENUM(Channeling::HandshakerMessageType_internal);
+
+#endif /* CHANNELING_HANDSHAKER_H */

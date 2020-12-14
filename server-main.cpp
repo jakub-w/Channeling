@@ -27,6 +27,8 @@
 #include "ProtocolCommon.h"
 #include "Server.h"
 
+using namespace Channeling;
+
 // auto handshaker = std::make_shared<StupidHandshaker>(ctx, "password");
 auto handshaker = std::make_shared<PakeHandshaker>("password");
 const auto message_handler = [](Bytes&& data) {

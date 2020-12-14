@@ -16,8 +16,8 @@
 // along with Lelo Remote Music Player. If not, see
 // <https://www.gnu.org/licenses/>.
 
-#ifndef PROTOCOLCOMMON_H
-#define PROTOCOLCOMMON_H
+#ifndef CHANNELING_PROTOCOLCOMMON_H
+#define CHANNELING_PROTOCOLCOMMON_H
 
 #include <array>
 
@@ -28,6 +28,7 @@
 
 #include "Logging.h"
 
+namespace Channeling {
 using CryptoKey = std::array<unsigned char, 32>;
 using EncKeys = msgpack::type::tuple<CryptoKey, CryptoKey>;
 // using EncKeys = std::tuple<CryptoKey, CryptoKey>;
@@ -47,14 +48,11 @@ enum class MessageType : int {
   AUTH_FINISHED,
   ENCRYPTED_DATA
 };
-MSGPACK_ADD_ENUM(MessageType);
 
 enum class ClientMessageType {
   PROTOCOL_ERROR = -1,
   DATA = 0
 };
-MSGPACK_ADD_ENUM(ClientMessageType);
-
 
 constexpr auto MessageTypeName(MessageType type) {
   switch (type) {
@@ -146,5 +144,9 @@ inline zmq::context_t& get_context() {
 
   return ctx;
 }
+}
 
-#endif /* PROTOCOLCOMMON_H */
+MSGPACK_ADD_ENUM(Channeling::MessageType);
+MSGPACK_ADD_ENUM(Channeling::ClientMessageType);
+
+#endif /* CHANNELING_PROTOCOLCOMMON_H */

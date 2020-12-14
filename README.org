@@ -15,6 +15,8 @@ The library is considered to be in pre-alpha, unstable state. Everything may cha
   #include "PakeHandshaker.h"
   #include "Server.h"
 
+  using namespace Channeling;
+
   int main() {
     auto handshaker = std::make_shared<PakeHandshaker>("password");
 
@@ -38,6 +40,8 @@ The library is considered to be in pre-alpha, unstable state. Everything may cha
 #+BEGIN_SRC cpp
   #include "Client.h"
   #include "PakeHandshaker.h"
+
+  using namespace Channeling;
 
   int main() {
     auto handshaker = std::make_shared<PakeHandshaker>("password");

@@ -24,6 +24,8 @@
 #include "PakeHandshaker.h"
 #include "Util.h"
 
+using namespace Channeling;
+
 int main() {
   // Client client{ctx, std::make_shared<StupidHandshaker>(ctx, "password")};
   Client client{std::make_shared<PakeHandshaker>("password")};

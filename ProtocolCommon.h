@@ -141,4 +141,10 @@ inline std::error_code recv_from_dealer(
   return {};
 }
 
+inline zmq::context_t& get_context() {
+  static zmq::context_t ctx;
+
+  return ctx;
+}
+
 #endif /* PROTOCOLCOMMON_H */

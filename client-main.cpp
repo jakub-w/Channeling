@@ -25,10 +25,8 @@
 #include "Util.h"
 
 int main() {
-  auto ctx = std::make_shared<zmq::context_t>();
-
   // Client client{ctx, std::make_shared<StupidHandshaker>(ctx, "password")};
-  Client client{ctx, std::make_shared<PakeHandshaker>(ctx, "password")};
+  Client client{std::make_shared<PakeHandshaker>("password")};
 
   const auto start = std::chrono::high_resolution_clock::now();
   if (not client.Connect("ipc:///tmp/zeromq-server")) {

@@ -17,6 +17,7 @@
 // <https://www.gnu.org/licenses/>.
 
 #include <chrono>
+#include <iostream>
 #include <thread>
 
 #include "Client.h"

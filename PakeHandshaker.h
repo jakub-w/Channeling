@@ -434,9 +434,7 @@ class PakeHandshaker : public Handshaker<PakeHandshaker> {
 
   // id will be used when the handshaker is on the server side.
   PakeHandshaker(std::string_view password)
-      : ctx_{get_context()},
-        socket_{ctx_, ZMQ_PAIR},
-        secret_{make_secret(password)},
+      : secret_{make_secret(password)},
         server_id_(5, ' ') {
     randombytes_buf(server_id_.data(), server_id_.length());
   }
@@ -476,125 +474,95 @@ class PakeHandshaker : public Handshaker<PakeHandshaker> {
   }
 
  private:
-  void worker() {
-    LOG_DEBUG("PAKE handshaker starting...");
-    try {
-      socket_.bind(address_);
-    } catch (const zmq::error_t& e) {
-      LOG_ERROR("Couldn't bind the handshaker: {}", e.what());
-      return;
+  std::optional<zmq::multipart_t> handle_message(zmq::multipart_t&& message) {
+    std::size_t offset = 0;
+    std::stringstream buffer;
+
+    if (3 != message.size()) {
+      LOG_ERROR("Handshaker received an unexpectedly structured "
+                "message. Frames: {}. Discarding", message.size());
+      LOG_TRACE("Contents: {}", message.str());
+      return {};
     }
 
-    std::array<zmq::pollitem_t, 1> items = {{
-        {socket_, 0, ZMQ_POLLIN, 0}
-      }};
+    auto client_id = std::string{message[0].data<char>(),
+      message[0].size()};
 
-    while (listening) {
-      try {
-        zmq::poll(items.data(), items.size(), std::chrono::milliseconds(500));
-      } catch (const zmq::error_t& e) {
-        if (EINTR != e.num()) {
-          LOG_ERROR("Handshaker poll error: {}", e.what());
-        }
-        break;
-      }
+    const char* data = message[2].data<char>();
+    const size_t data_size = message[2].size();
 
-      if (items[0].revents & ZMQ_POLLIN) {
-        std::size_t offset = 0;
-        std::stringstream buffer;
+    const auto type = Unpack<MessageType>(data, data_size, offset)
+                      .value_or(MessageType::BAD_MESSAGE);
 
-        zmq::multipart_t message(socket_);
+    LOG_DEBUG(
+        "Handshaker received a message. Type: {}, client id: {}",
+        MessageTypeName(type), client_id);
+    LOG_TRACE("Contents: ", message.str());
 
-        if (3 != message.size()) {
-          LOG_ERROR("Handshaker received an unexpectedly structured "
-                    "message. Frames: {}. Discarding", message.size());
-          LOG_TRACE("Contents: {}", message.str());
-          continue;
-        }
+    if (client_id.empty() or
+        MessageType::AUTH != type) {
+      msgpack::pack(buffer, type);
+      auto buffer_str = buffer.str();
+      message[2].rebuild(buffer_str.data(), buffer_str.size());
+      return std::optional<zmq::multipart_t>{std::move(message)};
+    }
 
-        auto client_id = std::string{message[0].data<char>(),
-          message[0].size()};
+    auto it = contexts.find(client_id);
+    if (contexts.end() == it) {
+      it = contexts.emplace(client_id, Responder(server_id_, secret_))
+           .first;
+    }
+    AuthContext& context = it->second;
 
-        const char* data = message[2].data<char>();
-        const size_t data_size = message[2].size();
+    auto result = std::visit([=](auto& ctx) {
+      return ctx.Next(data + offset, data_size - offset);
+    },
+      context);
 
-        const auto type = Unpack<MessageType>(data, data_size, offset)
-                    .value_or(MessageType::BAD_MESSAGE);
+    std::visit(overload{
+        [&](PartialMessage& msg) {
+          // Just send the message
 
-        LOG_DEBUG(
-            "Handshaker received a message. Type: {}, client id: {}",
-            MessageTypeName(type), client_id);
-        LOG_TRACE("Contents: ", message.str());
+          msgpack::pack(buffer, HandshakerMessageType::MESSAGE);
+          buffer << msg;
+          const auto buffer_str = buffer.str();
 
-        if (client_id.empty() or
-            MessageType::AUTH != type) {
-          msgpack::pack(buffer, type);
-          auto buffer_str = buffer.str();
           message[2].rebuild(buffer_str.data(), buffer_str.size());
-          message.send(socket_);
-          continue;
-        }
 
-        auto it = contexts.find(client_id);
-        if (contexts.end() == it) {
-          it = contexts.emplace(client_id, Responder(server_id_, secret_))
-               .first;
-        }
-        AuthContext& context = it->second;
-
-        auto result = std::visit([=](auto& ctx) {
-          return ctx.Next(data + offset, data_size - offset);
+          LOG_DEBUG("Handshaker sending MESSAGE message");
         },
-          context);
+        [&](EncKeys& keys) {
+          // Send just the keys on the socket
 
-        std::visit(overload{
-            [&](PartialMessage& msg) {
-              // Just send the message
+          contexts.erase(client_id);
+          msgpack::pack(buffer, HandshakerMessageType::KEYS);
+          msgpack::pack(buffer, keys);
+          const auto buffer_str = buffer.str();
+          message[2].rebuild(buffer_str.data(), buffer_str.size());
 
-              msgpack::pack(buffer, HandshakerMessageType::MESSAGE);
-              buffer << msg;
-              const auto buffer_str = buffer.str();
+          LOG_DEBUG("Handshaker sending KEYS message");
+        },
+        [&](std::pair<PartialMessage, EncKeys>& pair) {
+          // Send the message and the keys
 
-              message[2].rebuild(buffer_str.data(), buffer_str.size());
+          const auto& msg = pair.first;
+          const auto& keys = pair.second;
+          assert(not msg.empty()
+                 and not keys.get<0>().empty()
+                 and not keys.get<1>().empty());
 
-              LOG_DEBUG("Handshaker sending MESSAGE message");
-            },
-            [&](EncKeys& keys) {
-              // Send just the keys on the socket
+          msgpack::pack(buffer, HandshakerMessageType::KEYS_AND_MESSAGE);
+          msgpack::pack(buffer, keys);
+          buffer << msg;
+          const auto buffer_str = buffer.str();
+          message[2].rebuild(buffer_str.data(), buffer_str.size());
 
-              contexts.erase(client_id);
-              msgpack::pack(buffer, HandshakerMessageType::KEYS);
-              msgpack::pack(buffer, keys);
-              const auto buffer_str = buffer.str();
-              message[2].rebuild(buffer_str.data(), buffer_str.size());
+          LOG_DEBUG("Handshaker sending KEYS_AND_MESSAGE message");
+        }},
+      result);
 
-              LOG_DEBUG("Handshaker sending KEYS message");
-            },
-            [&](std::pair<PartialMessage, EncKeys>& pair) {
-              // Send the message and the keys
-
-              const auto& msg = pair.first;
-              const auto& keys = pair.second;
-              assert(not msg.empty()
-                     and not keys.get<0>().empty()
-                     and not keys.get<1>().empty());
-
-              msgpack::pack(buffer, HandshakerMessageType::KEYS_AND_MESSAGE);
-              msgpack::pack(buffer, keys);
-              buffer << msg;
-              const auto buffer_str = buffer.str();
-              message[2].rebuild(buffer_str.data(), buffer_str.size());
-
-              LOG_DEBUG("Handshaker sending KEYS_AND_MESSAGE message");
-            }},
-          result);
-
-        LOG_TRACE("Contents: {}", message.str());
-        message.send(socket_);
-      }
-    }
-
-    LOG_DEBUG("Handshaker stopped");
+    LOG_TRACE("Contents: {}", message.str());
+    return std::optional<zmq::multipart_t>{std::move(message)};
   }
 
   static std::optional<EcPoint> make_key_material(
@@ -628,12 +596,6 @@ class PakeHandshaker : public Handshaker<PakeHandshaker> {
 
 
   static size_t auth_number;
-
-  zmq::context_t& ctx_;
-  zmq::socket_t socket_;
-
-  // std::atomic_bool listening = false;
-  // std::thread thread_;
 
   EcScalar secret_;
   std::string server_id_;

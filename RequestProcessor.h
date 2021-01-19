@@ -72,7 +72,6 @@ class RequestProcessor {
       it = promises_.insert_or_assign(num, std::promise<MaybeResponse>{})
            .first;
     }
-    auto future = it->second.get_future();
 
     const auto make_error = [this, it](std::errc type) {
       it->second.set_value(
@@ -107,7 +106,7 @@ class RequestProcessor {
       return make_error(std::errc::protocol_error);
     }
 
-    return future;
+    return it->second.get_future();
   }
 
   inline void Stop() {

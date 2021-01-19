@@ -292,6 +292,7 @@ class Client {
 
   void Stop() noexcept {
     req_processor_.Stop();
+    handshaker_->Stop();
     LOG_INFO("Client stopped");
   }
 
@@ -315,7 +316,18 @@ class Client {
     if (std::future_status::ready != future.wait_for(timeout)) {
       return tl::unexpected(std::make_error_code(std::errc::timed_out));
     }
-    return future.get();
+    try {
+      return future.get();
+    } catch (const std::future_error& e) {
+      if (e.code() == std::future_errc::broken_promise) {
+        return tl::unexpected(
+            std::make_error_code(std::errc::operation_canceled));
+      } else {
+        LOG_ERROR("Error getting value from a future: {}", e.what());
+        return tl::unexpected(
+            std::make_error_code(std::errc::protocol_error));
+      }
+    }
   }
 
   template <typename Container,

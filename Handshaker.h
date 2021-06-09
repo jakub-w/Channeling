@@ -19,8 +19,7 @@
 #ifndef CHANNELING_HANDSHAKER_H
 #define CHANNELING_HANDSHAKER_H
 
-#include <iostream>
-
+#include <chrono>
 #include <thread>
 #include <unordered_map>
 
@@ -63,7 +62,9 @@ class Handshaker {
   using HandshakerMessageType = HandshakerMessageType_internal;
 
   constexpr Handshaker()
-      : address_{address_base() + std::to_string(socknum_++)} {}
+      : address_{address_base() + std::to_string(socknum_++)},
+        ctx_{get_context()},
+        socket_{*ctx_, ZMQ_PAIR} {}
 
   ~Handshaker() {
     Stop();
@@ -88,13 +89,51 @@ class Handshaker {
   }
 
  protected:
-  inline constexpr void worker() {
-    static_cast<T*>(this)->worker();
+  inline void worker() {
+    LOG_DEBUG("Handshaker started...");
+    try {
+      socket_.bind(address_);
+    } catch (const zmq::error_t& e) {
+      LOG_ERROR("Couldn't bind the handshaker: {}", e.what());
+      return;
+    }
+
+    std::array<zmq::pollitem_t, 1> items = {{
+        {socket_, 0, ZMQ_POLLIN, 0}
+      }};
+
+    while (listening) {
+      try {
+        zmq::poll(std::data(items), std::size(items),
+                  std::chrono::milliseconds(500));
+      } catch (const zmq::error_t& e) {
+        if (EINTR != e.num()) {
+          LOG_ERROR("Handshaker poll error: {}", e.what());
+        }
+        break;
+      }
+
+      if (items[0].revents & ZMQ_POLLIN) {
+        std::optional<zmq::multipart_t> message(zmq::multipart_t{socket_});
+        message = static_cast<T*>(this)->handle_message(
+            std::move(message.value()));
+        if (message.has_value()) {
+          message.value().send(socket_);
+        }
+      }
+    }
+
+    LOG_DEBUG("Handshaker stopped");
+
+    // static_cast<T*>(this)->worker();
   }
 
   const std::string address_;
 
   std::atomic_bool listening = false;
+
+  std::shared_ptr<zmq::context_t> ctx_;
+
 
  private:
   static const std::string& address_base() {
@@ -106,6 +145,7 @@ class Handshaker {
   std::thread thread_;
 
   static size_t socknum_;
+  zmq::socket_t socket_;
 };
 
 template <typename T>
@@ -114,10 +154,8 @@ size_t Handshaker<T>::socknum_ = 0;
 
 class StupidHandshaker : public Handshaker<StupidHandshaker> {
  public:
-  StupidHandshaker(std::shared_ptr<zmq::context_t> context,
-                   std::string_view password)
-      : ctx_{get_context()},
-        socket_{*ctx_, ZMQ_PAIR},
+  StupidHandshaker(std::string_view password)
+      : socket_{*ctx_, ZMQ_PAIR},
         password_{password} {}
 
   StupidHandshaker(const StupidHandshaker&) = delete;
@@ -148,85 +186,60 @@ class StupidHandshaker : public Handshaker<StupidHandshaker> {
   }
 
  private:
-  void worker() {
-    try {
-      socket_.bind(address_);
-    } catch (const zmq::error_t& e) {
-      std::cerr << "Zmq exception thrown on bind(): " << e.what() << '\n';
-      return;
-    }
+  std::optional<zmq::multipart_t> handle_message(zmq::multipart_t&& message) {
+    LOG_TRACE("Handshaker received: {}\n",message.str());
 
-    std::array<zmq::pollitem_t, 1> items = {{
-        {static_cast<void*>(socket_), 0, ZMQ_POLLIN, 0},
-      }};
+    std::string client_id{message[0].data<char>(), message[0].size()};
+    std::size_t offset = 0;
 
-    while (listening) {
-      zmq::poll(items.data(), items.size(), std::chrono::milliseconds(500));
+    auto type = Unpack<MessageType>(message[2].data<char>(),
+                                    message[2].size(),
+                                    offset)
+                .value_or(MessageType::BAD_MESSAGE);
+    if (MessageType::AUTH != type) {
+      type = MessageType::BAD_MESSAGE;
+      message[2].rebuild(&type, sizeof(type));
+      return std::optional<zmq::multipart_t>{std::move(message)};
+    } else {
+      const auto maybe_password =
+          Unpack<std::string>(message[2].data<char>(),
+                              message[2].size(),
+                              offset);
 
-      // normal socket
-      if (items[0].revents & ZMQ_POLLIN) {
-        zmq::multipart_t message(socket_);
+      if (maybe_password and
+          maybe_password.value() == password_) {
+        msgpack::type::tuple<CryptoKey, CryptoKey> keypair;
 
-        std::cout << "Handshaker received: " << message.str() << "\n\n";
+        std::stringstream buffer;
+        msgpack::pack(buffer, HandshakerMessageType::KEYS);
+        msgpack::pack(buffer, keypair);
+        const std::string buffer_str = buffer.str();
+        message[2].rebuild(buffer_str.data(), buffer_str.size());
 
-        std::string client_id{message[0].data<char>(), message[0].size()};
-        std::size_t offset = 0;
+        return std::optional<zmq::multipart_t>{std::move(message)};
+      } else {
+        std::stringstream ss;
 
-        auto type = Unpack<MessageType>(message[2].data<char>(),
-                                        message[2].size(),
-                                        offset)
-                    .value_or(MessageType::BAD_MESSAGE);
-        if (MessageType::AUTH != type) {
-          type = MessageType::BAD_MESSAGE;
-          message[2].rebuild(&type, sizeof(type));
-          message.send(socket_);
+        if (not maybe_password) {
+          LOG_ERROR("Incomplete message");
+          msgpack::pack(ss, MessageType::BAD_MESSAGE);
         } else {
-          const auto maybe_password =
-              Unpack<std::string>(message[2].data<char>(),
-                                  message[2].size(),
-                                  offset);
-
-          if (maybe_password and
-              maybe_password.value() == password_) {
-            msgpack::type::tuple<CryptoKey, CryptoKey> keypair;
-
-            std::stringstream buffer;
-            msgpack::pack(buffer, HandshakerMessageType::KEYS);
-            msgpack::pack(buffer, keypair);
-            const std::string buffer_str = buffer.str();
-            message[2].rebuild(buffer_str.data(), buffer_str.size());
-
-            message.send(socket_);
-          } else {
-            std::stringstream ss;
-
-            if (not maybe_password) {
-              std::cerr << "Incomplete message\n";
-              msgpack::pack(ss, MessageType::BAD_MESSAGE);
-            } else {
-              std::cerr << "Wrong password\n";
-              msgpack::pack(ss, MessageType::DENY);
-            }
-
-            std::string message_str = ss.str();
-            message[2].rebuild(message_str.data(), message_str.size());
-
-            std::cout << message.str() << "\n\n";
-
-            message.send(socket_);
-          }
+          LOG_ERROR("Wrong password");
+          msgpack::pack(ss, MessageType::DENY);
         }
+
+        std::string message_str = ss.str();
+        message[2].rebuild(message_str.data(), message_str.size());
+
+        LOG_TRACE("Handshaker sending: {}\n", message.str());
+
+        return std::optional<zmq::multipart_t>{std::move(message)};
       }
     }
-    std::cout << "Handshaker closing...\n";
   }
 
-  std::shared_ptr<zmq::context_t> ctx_;
   zmq::socket_t socket_;
   const std::string password_;
-
-  // std::thread thread_;
-  // std::atomic_bool listening = false;
 
   friend class Handshaker;
 };

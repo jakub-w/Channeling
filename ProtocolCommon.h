@@ -139,10 +139,19 @@ inline std::error_code recv_from_dealer(
   return {};
 }
 
-inline zmq::context_t& get_context() {
-  static zmq::context_t ctx;
+inline std::shared_ptr<zmq::context_t> get_context() {
+  static std::weak_ptr<zmq::context_t> ctx_;
+  static std::mutex mtx_;
 
-  return ctx;
+  std::lock_guard lock{mtx_};
+
+  if (ctx_.expired()) {
+    auto ctx = std::make_shared<zmq::context_t>();
+    ctx_ = ctx;
+    return ctx;
+  }
+
+  return ctx_.lock();
 }
 }
 

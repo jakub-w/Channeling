@@ -117,7 +117,7 @@ class StupidHandshaker : public Handshaker<StupidHandshaker> {
   StupidHandshaker(std::shared_ptr<zmq::context_t> context,
                    std::string_view password)
       : ctx_{get_context()},
-        socket_{ctx_, ZMQ_PAIR},
+        socket_{*ctx_, ZMQ_PAIR},
         password_{password} {}
 
   StupidHandshaker(const StupidHandshaker&) = delete;
@@ -221,7 +221,7 @@ class StupidHandshaker : public Handshaker<StupidHandshaker> {
     std::cout << "Handshaker closing...\n";
   }
 
-  zmq::context_t& ctx_;
+  std::shared_ptr<zmq::context_t> ctx_;
   zmq::socket_t socket_;
   const std::string password_;
 

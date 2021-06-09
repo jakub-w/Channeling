@@ -57,8 +57,8 @@ class Client {
   Client(std::shared_ptr<Handshaker> handshaker)
       noexcept
       : ctx_{get_context()},
-        socket_{ctx_, ZMQ_DEALER},
-        handshaker_socket_{ctx_, ZMQ_PAIR},
+        socket_{*ctx_, ZMQ_DEALER},
+        handshaker_socket_{*ctx_, ZMQ_PAIR},
         handshaker_{std::move(handshaker)},
         req_processor_{zmq::socket_ref{}, nullptr, nullptr} {}
 
@@ -292,6 +292,7 @@ class Client {
 
   void Stop() noexcept {
     req_processor_.Stop();
+    handshaker_->Stop();
     LOG_INFO("Client stopped");
   }
 
@@ -444,7 +445,7 @@ class Client {
 
   static constexpr char user_data_socket_address[] =  "inproc://user-data";
 
-  zmq::context_t& ctx_;
+  std::shared_ptr<zmq::context_t> ctx_;
   zmq::socket_t socket_;
   zmq::socket_t handshaker_socket_;
 

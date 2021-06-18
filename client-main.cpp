@@ -42,12 +42,6 @@ int main() {
 
   std::cout << "Connection established successfully!\n";
 
-  auto ec = client.RunAsync();
-  if (ec) {
-    std::cerr << ec.message() << '\n';
-    return 1;
-  }
-
   Bytes data{'l', 'a', 'l', 'a', 'l', 'a'};
 
   const auto print_response = [](const auto& response){

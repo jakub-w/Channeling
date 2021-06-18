@@ -67,12 +67,6 @@ class ClientBase {
   [[nodiscard]]
   bool Connect(std::string_view address);
 
-  /// \return \e std::errc::operation_not_permitted if called when in wrong
-  /// state. Make sure \ref Connect() returned \e true.
-  /// \return \e std::errc::protocol_error when internal error occured.
-  [[nodiscard]]
-  std::error_code RunAsync() noexcept;
-
   inline void Stop() noexcept {
     req_processor_.Stop();
     LOG_INFO("Client stopped");
@@ -134,6 +128,13 @@ class ClientBase {
   RequestAsync(const Container& data) noexcept {
     return req_processor_.MakeRequest(std::data(data), std::size(data));
   }
+
+ private:
+  /// \return \e std::errc::operation_not_permitted if called when in wrong
+  /// state. Make sure \ref Connect() returned \e true.
+  /// \return \e std::errc::protocol_error when internal error occured.
+  [[nodiscard]]
+  std::error_code run_async() noexcept;
 
  protected:
   const std::string handshaker_address_;

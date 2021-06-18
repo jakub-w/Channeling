@@ -135,6 +135,7 @@ bool ClientBase::Connect(std::string_view address) {
         }
 
         LOG_INFO("Handshake with {} successfull", address);
+        if (run_async()) return false;
         return true;
       }
       case MessageType::ACK: {
@@ -157,6 +158,7 @@ bool ClientBase::Connect(std::string_view address) {
         }
 
         LOG_INFO("Handshake with {} successfull", address);
+        if (run_async()) return false;
         return true;
       }
       case MessageType::DENY:
@@ -193,7 +195,7 @@ bool ClientBase::Connect(std::string_view address) {
   }
 }
 
-std::error_code ClientBase::RunAsync() noexcept {
+std::error_code ClientBase::run_async() noexcept {
   if (not (
           std::holds_alternative<crypto::SodiumEncryptionContext>(
               encryption_ctx) and

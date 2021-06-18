@@ -26,7 +26,7 @@ template<class... Ts> struct overload : Ts... { using Ts::operator()...; };
 template<class... Ts> overload(Ts...) -> overload<Ts...>;
 
 // size in bytes
-std::string to_hex(const void* data, size_t size) {
+inline std::string to_hex(const void* data, size_t size) {
   const unsigned char* data_ = static_cast<const unsigned char*>(data);
   std::string result(size * 2, ' ');
   for (size_t i = 0; i < size; ++i) {

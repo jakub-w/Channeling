@@ -28,8 +28,7 @@
 using namespace Channeling;
 
 int main() {
-  // Client client{ctx, std::make_shared<StupidHandshaker>(ctx, "password")};
-  Client client{std::make_shared<PakeHandshaker>("password")};
+  auto client = Channeling::MakeClient<PakeHandshaker>("password");
 
   const auto start = std::chrono::high_resolution_clock::now();
   if (not client.Connect("ipc:///tmp/zeromq-server")) {
@@ -43,7 +42,7 @@ int main() {
 
   std::cout << "Connection established successfully!\n";
 
-  auto ec = client.Start();
+  auto ec = client.RunAsync();
   if (ec) {
     std::cerr << ec.message() << '\n';
     return 1;
@@ -53,14 +52,26 @@ int main() {
 
   const auto print_response = [](const auto& response){
     response.map([](const Bytes& data){
+      std::cout << "Response: ";
       std::cout.write(reinterpret_cast<const char*>(data.data()), data.size())
           << '\n';
     }).or_else([](std::error_code ec){
       std::cerr << "Error: " << ec.message() << '\n';
     });
   };
-  print_response(client.Request(data));
-  print_response(client.Request(data));
+
+  std::vector<std::future<decltype(client)::MaybeResponse>> responses;
+  for (int i = 0; i < 10; ++i) {
+    responses.push_back(std::async([&]{ return client.Request(data); }));
+    // std::this_thread::sleep_for(std::chrono::milliseconds(200));
+  }
+
+  auto resp = client.Request(Bytes{'f', 'o', 'o'});
+
+
+  for (auto& response_fut : responses) {
+    print_response(response_fut.get());
+  }
 
   return 0;
 }

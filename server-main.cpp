@@ -20,8 +20,6 @@
 #include <iostream>
 #include <memory>
 
-#include <zmq.hpp>
-
 // #include "Handshaker.h"
 #include "PakeHandshaker.h"
 #include "ProtocolCommon.h"
@@ -29,15 +27,15 @@
 
 using namespace Channeling;
 
-// auto handshaker = std::make_shared<StupidHandshaker>(ctx, "password");
-auto handshaker = std::make_shared<PakeHandshaker>("password");
-const auto message_handler = [](Bytes&& data) {
+const auto message_handler = [](Bytes&& data) mutable {
   std::cout.write(reinterpret_cast<const char*>(data.data()),
                   data.size()) << '\n';
 
   return Bytes{'r', 'e', 's', 'p', 'o', 'n', 's', 'e'};
 };
-Server server(handshaker, message_handler);
+
+auto server =
+    Channeling::MakeServer<PakeHandshaker>(message_handler, "password");
 
 void close_server(int signum) {
   if (signum == SIGTERM or

@@ -36,7 +36,7 @@ class RequestProcessor {
     }
     promises_ = std::move(other.promises_);
     if (was_running) {
-      Start();
+      RunAsync();
     }
   }
 
@@ -50,7 +50,7 @@ class RequestProcessor {
     }
     promises_ = std::move(other.promises_);
     if (was_running) {
-      Start();
+      RunAsync();
     }
     return *this;
   }
@@ -116,7 +116,12 @@ class RequestProcessor {
     }
   }
 
-  inline void Start() {
+  inline void Run() {
+    if (running_.exchange(true)) return;
+    server_loop();
+  }
+
+  inline void RunAsync() {
     if (running_.exchange(true)) return;
     thread_ = std::thread(&RequestProcessor::server_loop, this);
   }
@@ -156,7 +161,7 @@ class RequestProcessor {
                                                    message.size(), offset)
                                   .value_or(0);
           LOG_DEBUG("Message received. Type: {}, request id: {}",
-                    type, request_id);
+                    MessageTypeName(type), request_id);
           LOG_TRACE("Contents: {}", to_hex(message.to_string_view()));
 
           if (0 == request_id) {

@@ -42,6 +42,7 @@ enum class MessageType : int {
   UNKNOWN = -1,
   ACK,
   ID,
+  AUTH_REQUEST,
   AUTH,
   DENY,
   AUTH_CONFIRM,
@@ -66,6 +67,8 @@ constexpr auto MessageTypeName(MessageType type) {
       return "ACK";
     case MessageType::ID:
       return "ID";
+    case MessageType::AUTH_REQUEST:
+      return "AUTH_REQUEST";
     case MessageType::AUTH:
       return "AUTH";
     case MessageType::DENY:
@@ -120,7 +123,7 @@ zmq::message_t make_msg(const Args&... args) {
   (msgpack::pack(buffer, args), ...);
   const auto buffer_str = buffer.str();
 
-  return zmq::message_t{buffer_str.data(), buffer_str.size()};
+  return zmq::message_t(buffer_str.data(), buffer_str.size());
 }
 
 inline auto make_unexpected(std::errc errc) {

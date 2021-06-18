@@ -17,7 +17,7 @@
 # <https://www.gnu.org/licenses/>.
 
 project('channeling', 'cpp',
-        default_options: ['cpp_std=c++17'])
+        default_options: ['cpp_std=c++20'])
 
 # Build types
 if get_option('buildtype').startswith('debug')
@@ -69,7 +69,8 @@ executable('server',
 
 executable('client',
 	   sources: ['client-main.cpp',
-		     'EncryptionCommon.cpp'],
+		     'EncryptionCommon.cpp',
+		     'Client.cpp'],
 	   include_directories: [subproject_incs],
 	   link_with: [cipher_stream_lib],
 	   dependencies: required_deps)

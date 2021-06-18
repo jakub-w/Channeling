@@ -20,6 +20,7 @@
 #define CHANNELING_SERVER_H
 
 #include <algorithm>
+#include <chrono>
 #include <functional>
 #include <memory>
 #include <string_view>
@@ -27,8 +28,6 @@
 #include <variant>
 
 #include <msgpack.hpp>
-
-#include <spdlog/spdlog.h>
 
 #include <zmq.h>
 #include <zmq.hpp>
@@ -43,13 +42,13 @@
 #include "Util.h"
 
 namespace Channeling {
+
 /// \e MessageHandlerResult must be an rvalue, also it must own the data
 /// stored inside of it. The data will be used by an encryption algorithm so
 /// it is crucial for it to live long enough to do that. If this restriction
 /// is not followed it could lead to hard to track memory errors.
 /// \e MessageHandlerResult must also have size() and data() member functions.
-template <class Handshaker,
-          typename MessageHandler,
+template <typename MessageHandler,
           typename MessageHandlerResult =
               std::result_of_t<MessageHandler(Bytes&&)>,
           std::enable_if_t<not (std::is_pointer_v<MessageHandlerResult> or
@@ -57,8 +56,8 @@ template <class Handshaker,
                            bool> = 0,
           std::enable_if_t<has_data_and_size_v<MessageHandlerResult>,
                            bool> = 0>
-class Server {
-  using HandshakerMessageType = typename Handshaker::HandshakerMessageType;
+class ServerBase {
+  using HandshakerMessageType = HandshakerMessageType_internal;
 
   struct client_info {
     bool authenticated = false;
@@ -70,25 +69,29 @@ class Server {
   };
 
  public:
-  Server(std::shared_ptr<Handshaker> handshaker,
-         MessageHandler message_handler)
-      : ctx_{get_context()},
-        handshaker_{std::move(handshaker)},
+  inline ServerBase(std::string_view handshaker_address,
+                    MessageHandler message_handler)
+      : handshaker_address_{handshaker_address},
+        ctx_{get_context()},
         socket_{*ctx_, ZMQ_ROUTER},
         handshaker_socket_{*ctx_, ZMQ_PAIR},
-        user_data_handler_{std::move(message_handler)} {}
+        user_data_handler_{std::move(message_handler)} {
+    // If the server has static lifetime spdlog could deinitialize before
+    // the server is destroyed, which would cause a segfault. This is a
+    // workaround.
+    spdlog::default_logger();
+  }
 
-  ~Server() {
+  virtual inline ~ServerBase() {
     Close();
   }
 
-  constexpr void Bind(std::string_view address) {
+  inline constexpr void Bind(std::string_view address) {
     LOG_INFO("Binding the server to {}", address);
     socket_.bind(address.data());
   }
 
-  constexpr void Close() {
-    handshaker_->Stop();
+  inline constexpr void Close() {
     run = false;
   }
 
@@ -97,8 +100,7 @@ class Server {
 
     LOG_INFO("Server starting...");
 
-    handshaker_->Start();
-    handshaker_socket_.connect(handshaker_->GetAddress());
+    handshaker_socket_.connect(handshaker_address_);
 
     std::array<zmq::pollitem_t, 3> items = {{
         {static_cast<void*>(socket_), 0, ZMQ_POLLIN, 0},
@@ -582,7 +584,12 @@ class Server {
     LOG_DEBUG("Message sent to client '{}'", client_id);
   }
 
+  // ------------------- PROTECTED FIELDS -------------------
+ protected:
+  const std::string handshaker_address_;
+
   // -------------------- PRIVATE FIELDS --------------------
+ private:
   static constexpr std::array allowed_before_auth = {
     MessageType::AUTH,
     MessageType::AUTH_CONFIRM,
@@ -596,7 +603,6 @@ class Server {
   std::atomic_bool run = false;
 
   std::shared_ptr<zmq::context_t> ctx_;
-  std::shared_ptr<Handshaker> handshaker_;
 
   zmq::socket_t socket_;
   zmq::socket_t handshaker_socket_;
@@ -605,6 +611,36 @@ class Server {
 
   MessageHandler user_data_handler_;
 };
+
+template <typename Handshaker, typename MessageHandler>
+class Server : public ServerBase<MessageHandler> {
+  Handshaker handshaker_;
+
+ public:
+  // template <typename... Args>
+  Server(MessageHandler message_handler, auto... args)
+      : ServerBase<MessageHandler>(Handshaker::make_address(),
+                               std::forward<MessageHandler>(message_handler)),
+        handshaker_{std::forward<decltype(args)>(args)...} {
+    handshaker_.SetAddress(this->handshaker_address_);
+    handshaker_.RunAsync();
+  }
+
+  virtual ~Server() {
+    handshaker_.Stop();
+  }
+};
+
+/// \brief Create a server that uses \ref Handshaker.
+///
+/// \param[in] message_handler A handler for incoming requests from clients.
+/// \param args Arguments for the \ref Handshaker's constructor.
+template <typename Handshaker>
+inline auto MakeServer(auto message_handler, auto... args) {
+  return Server<Handshaker, decltype(message_handler)>(
+      std::forward<decltype(message_handler)>(message_handler),
+      std::forward<decltype(args)>(args)...);
 }
+} // namespace Channeling
 
 #endif /* CHANNELING_SERVER_H */

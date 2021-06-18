@@ -433,9 +433,8 @@ class PakeHandshaker : public Handshaker<PakeHandshaker> {
   };
 
   // id will be used when the handshaker is on the server side.
-  PakeHandshaker(std::string_view password)
-      : socket_{*ctx_, ZMQ_PAIR},
-        secret_{make_secret(password)},
+  explicit PakeHandshaker(std::string_view password)
+      : secret_{make_secret(password)},
         server_id_(5, ' ') {
     randombytes_buf(server_id_.data(), server_id_.length());
   }
@@ -448,7 +447,7 @@ class PakeHandshaker : public Handshaker<PakeHandshaker> {
   }
 
   // id is the external socket id
-  zmq::message_t GetAuthRequest(const std::string& id) {
+  zmq::message_t get_auth_request(const std::string& id) {
     auto [privkey1, pubkey1, zkp1] = generate_keypair(id);
     auto [privkey2, pubkey2, zkp2] = generate_keypair(id);
 
@@ -461,51 +460,34 @@ class PakeHandshaker : public Handshaker<PakeHandshaker> {
 
     std::string buffer_str = buffer.str();
 
-    auto context = contexts.find(id);
-    if (contexts.end() == context) {
-      context = contexts.emplace(id, Requester(id, secret_,
-                                                   // std::move(privkey1),
-                                                   std::move(privkey2),
-                                                   std::move(pubkey1),
-                                                   std::move(pubkey2)))
-                .first;
+    if (auto context = contexts.find(id);
+        contexts.end() == context) {
+      contexts.emplace(id, Requester(id, secret_,
+                                     // std::move(privkey1),
+                                     std::move(privkey2),
+                                     std::move(pubkey1),
+                                     std::move(pubkey2)));
     }
 
     return zmq::message_t{buffer_str.data(), buffer_str.size()};
   }
 
  private:
-  std::optional<zmq::multipart_t> handle_message(zmq::multipart_t&& message) {
+  zmq::message_t handle_message(const std::string& client_id,
+                                const char* data,
+                                size_t data_size) {
     std::size_t offset = 0;
     std::stringstream buffer;
-
-    if (3 != message.size()) {
-      LOG_ERROR("Handshaker received an unexpectedly structured "
-                "message. Frames: {}. Discarding", message.size());
-      LOG_TRACE("Contents: {}", message.str());
-      return {};
-    }
-
-    auto client_id = std::string{message[0].data<char>(),
-      message[0].size()};
-
-    const char* data = message[2].data<char>();
-    const size_t data_size = message[2].size();
 
     const auto type = Unpack<MessageType>(data, data_size, offset)
                       .value_or(MessageType::BAD_MESSAGE);
 
-    LOG_DEBUG(
-        "Handshaker received a message. Type: {}, client id: {}",
-        MessageTypeName(type), client_id);
-    LOG_TRACE("Contents: ", message.str());
-
     if (client_id.empty() or
         MessageType::AUTH != type) {
       msgpack::pack(buffer, type);
+
       auto buffer_str = buffer.str();
-      message[2].rebuild(buffer_str.data(), buffer_str.size());
-      return std::optional<zmq::multipart_t>{std::move(message)};
+      return zmq::message_t{buffer_str.data(), buffer_str.size()};
     }
 
     auto it = contexts.find(client_id);
@@ -520,17 +502,17 @@ class PakeHandshaker : public Handshaker<PakeHandshaker> {
     },
       context);
 
-    std::visit(overload{
+    return std::visit(overload{
         [&](PartialMessage& msg) {
           // Just send the message
 
           msgpack::pack(buffer, HandshakerMessageType::MESSAGE);
           buffer << msg;
-          const auto buffer_str = buffer.str();
-
-          message[2].rebuild(buffer_str.data(), buffer_str.size());
 
           LOG_DEBUG("Handshaker sending MESSAGE message");
+
+          auto buffer_str = buffer.str();
+          return zmq::message_t{buffer_str.data(), buffer_str.size()};
         },
         [&](EncKeys& keys) {
           // Send just the keys on the socket
@@ -538,10 +520,11 @@ class PakeHandshaker : public Handshaker<PakeHandshaker> {
           contexts.erase(client_id);
           msgpack::pack(buffer, HandshakerMessageType::KEYS);
           msgpack::pack(buffer, keys);
-          const auto buffer_str = buffer.str();
-          message[2].rebuild(buffer_str.data(), buffer_str.size());
 
           LOG_DEBUG("Handshaker sending KEYS message");
+
+          auto buffer_str = buffer.str();
+          return zmq::message_t{buffer_str.data(), buffer_str.size()};
         },
         [&](std::pair<PartialMessage, EncKeys>& pair) {
           // Send the message and the keys
@@ -555,15 +538,13 @@ class PakeHandshaker : public Handshaker<PakeHandshaker> {
           msgpack::pack(buffer, HandshakerMessageType::KEYS_AND_MESSAGE);
           msgpack::pack(buffer, keys);
           buffer << msg;
-          const auto buffer_str = buffer.str();
-          message[2].rebuild(buffer_str.data(), buffer_str.size());
 
           LOG_DEBUG("Handshaker sending KEYS_AND_MESSAGE message");
+
+          auto buffer_str = buffer.str();
+          return zmq::message_t{buffer_str.data(), buffer_str.size()};
         }},
       result);
-
-    LOG_TRACE("Contents: {}", message.str());
-    return std::optional<zmq::multipart_t>{std::move(message)};
   }
 
   static std::optional<EcPoint> make_key_material(
@@ -621,7 +602,7 @@ MSGPACK_ADD_ENUM(Channeling::PakeHandshaker::Step);
 // ambiguity on how to process the received data.
 
 // Client doesn't know what's his id. It should be therefore generated before
-// connecting to the server and set with GetAuthRequest().
+// connecting to the server and set with get_auth_request().
 // Client will also require the id of the server. This will be sent in a zkp.
 //
 // The server should have a constant id. It could be generated for every

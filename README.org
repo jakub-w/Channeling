@@ -18,8 +18,6 @@ The library is considered to be in pre-alpha, unstable state. Everything may cha
   using namespace Channeling;
 
   int main() {
-    auto handshaker = std::make_shared<PakeHandshaker>("password");
-
     const auto message_handler = [](const Bytes& data) {
       // Print the message, treating is as a string.
       std::cout.write(reinterpret_cast<const char*>(data.data()),
@@ -29,7 +27,7 @@ The library is considered to be in pre-alpha, unstable state. Everything may cha
       return Bytes{'r', 'e', 's', 'p', 'o', 'n', 's', 'e'};
     };
 
-    Server server{std::move(handshaker), message_handler};
+    auto server = MakeServer<PakeHandshaker>(message_handler, "password");
 
     // Bind to ZeroMQ address, could be "tcp://1.2.3.4:5678" for network address
     server.Bind("ipc://zeromq-server");
@@ -44,17 +42,10 @@ The library is considered to be in pre-alpha, unstable state. Everything may cha
   using namespace Channeling;
 
   int main() {
-    auto handshaker = std::make_shared<PakeHandshaker>("password");
-    Client client{std::move(handshaker)};
+    auto client = MakeClient<PakeHandshaker>("password");
 
     if (not client.Connect("ipc://zeromq-server")) {
       std::cerr << "Connection failed\n";
-      return 1;
-    }
-
-    auto ec = client.Start(); // works asynchronously
-    if (ec) {
-      std::cerr << ec.message() << '\n';
       return 1;
     }
 

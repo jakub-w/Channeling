@@ -29,6 +29,7 @@
 #include <msgpack.hpp>
 
 #include "ProtocolCommon.h"
+#include "Util.h"
 
 namespace Channeling {
 namespace {
@@ -164,7 +165,7 @@ class Handshaker {
         zmq::message_t out_data = static_cast<T*>(this)->handle_message(
             client_id, data, data_size);
 
-        LOG_TRACE("Contents: {}", out_data.str());
+        LOG_TRACE("Contents: {}", to_hex(out_data.data(), out_data.size()));
 
         message[2] = std::move(out_data);
 

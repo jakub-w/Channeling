@@ -52,7 +52,7 @@ bool ClientBase::Connect(std::string_view address) {
                       .value_or(MessageType::UNKNOWN);
 
     LOG_DEBUG("Received {} message from server", MessageTypeName(type));
-    LOG_TRACE("Contents: {}", message.str());
+    LOG_TRACE("Contents: {}", to_hex(message.data(), message.size()));
 
     switch (type) {
       case MessageType::AUTH_CONFIRM: {
@@ -164,7 +164,8 @@ bool ClientBase::Connect(std::string_view address) {
       case MessageType::DENY:
       case MessageType::BAD_MESSAGE:
       case MessageType::PROTOCOL_ERROR:
-        LOG_ERROR("Not authenticated. Wrong type message received");
+        LOG_ERROR("Not authenticated. Wrong type message received: {}",
+                  MessageTypeName(type));
         return false;
       case MessageType::AUTH: {
         zmq::multipart_t msg;

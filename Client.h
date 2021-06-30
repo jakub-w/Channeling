@@ -47,6 +47,34 @@
 #include "Util.h"
 
 namespace Channeling {
+/// Base class for \ref Client.
+/// Can be used for detached \ref Handshaker s.
+///
+/// \remark { All addresses in the examples are in ZeroMQ address syntax. }
+///
+/// E.g.:
+/// \code{.cpp}
+/// PakeHandshaker handshaker("password");
+/// handshaker.Start();
+///
+/// ClientBase client(handshaker.GetAddress());
+/// client.Connect(server_address);
+/// auto maybe_response = client.Request(Bytes{'f', 'o', 'o'});
+/// \endcode
+///
+/// It's possible to run the \ref Handshaker as a separate service from the
+/// client.
+/// \code{.cpp}
+/// // Service 1:
+/// PakeHandshaker handshaker("password");
+/// handshaker.SetAddress("tcp://*:54321");
+/// handshaker.Run();
+///
+/// // Service 2:
+/// ClientBase client("tcp://1.2.3.4:54321"); // passing handshaker ip address
+/// client.Connect("tcp://4.3.2.1:12345");    // passing server ip address
+/// auto maybe_response = client.Request(Bytes{'f', 'o', 'o'});
+/// \endcode
 class ClientBase {
   using HandshakerMessageType = HandshakerMessageType_internal;
 
